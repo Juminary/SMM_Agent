@@ -296,14 +296,44 @@ class PricePredictor(Tool):
                 'confidence': 0.60
             }
 
-    def execute(self, material_id: str, quantity: int = 10000, **kwargs) -> Dict[str, Any]:
+    def execute(self, material_id: str, quantity: int = 10000,
+                category: str = None, processing: str = None,
+                unit_price: float = None, **kwargs) -> Dict[str, Any]:
         """Tool 接口：预测价格区间"""
         matched = next((m for m in self.materials if m['id'] == material_id), None)
+
+        # Fallback: 如果 material_id 找不到，尝试用 category + processing + unit_price 构造
         if matched is None:
+            if category:
+                cat_prices = self.category_stats.get(category, [])
+                n = len(cat_prices)
+                if n > 0:
+                    prices = sorted(cat_prices)
+                    p10 = round(prices[max(0, int(n * 0.1))], 2)
+                    p50 = round(prices[max(0, int(n * 0.5))], 2)
+                    p90 = round(prices[min(n - 1, int(n * 0.9))], 2)
+                    factor = 1.05 if (processing and '沉金' in processing) else 1.0
+                    qty_factor = 1 + (10000 - quantity) / 100000
+                    return {
+                        "result": {
+                            'p10': round(p10 * factor * qty_factor, 2),
+                            'p50': round(p50 * factor * qty_factor, 2),
+                            'p90': round(p90 * factor * qty_factor, 2),
+                            'confidence': round(0.70 + 0.05 * min(n / 20, 1), 2),
+                        },
+                        "confidence": round(0.70 + 0.05 * min(n / 20, 1), 3),
+                        "reasoning": (
+                            f"[Fallback] 类别 {category} 有 {n} 条历史记录，"
+                            f"预测区间 [P10=¥{round(p10 * factor * qty_factor, 2)}, "
+                            f"P50=¥{round(p50 * factor * qty_factor, 2)}, "
+                            f"P90=¥{round(p90 * factor * qty_factor, 2)}]，"
+                            f"工艺={processing or '未知'}，数量={quantity}"
+                        ),
+                    }
             return {
                 "result": {},
                 "confidence": 0.0,
-                "reasoning": f"物料ID {material_id} 在历史库中未找到",
+                "reasoning": f"物料ID {material_id} 在历史库中未找到，且无 category 可用",
             }
 
         mat = {**matched, "quantity": quantity}
@@ -415,9 +445,12 @@ class CostAnalyzer(Tool):
             adjusted['processing_pct'] = 35
         return adjusted
 
-    def execute(self, material_id: str, supplier_quote: float, **kwargs) -> Dict[str, Any]:
+    def execute(self, material_id: str, supplier_quote: float,
+                category: str = None, processing: str = None, **kwargs) -> Dict[str, Any]:
         """Tool 接口：分析成本结构"""
-        result = self.analyze({"id": material_id, "category": "塑料外壳"}, supplier_quote)
+        mat_category = category or "塑料外壳"
+        mat = {"id": material_id, "category": mat_category, "processing": processing or ""}
+        result = self.analyze(mat, supplier_quote)
         abnormal_items = [c for c in result['cost_items'] if c['status'] not in ("正常",)]
         return {
             "result": result,
@@ -433,8 +466,80 @@ class CostAnalyzer(Tool):
         }
 
 
+class ExternalRAGRetriever:
+    """外部 RAG 检索器（目前为模拟实现，之后可替换为 ChromaDB 向量检索）"""
+
+    def __init__(self, external_refs: List[Dict]):
+        self._refs = {ref['material_category']: ref for ref in external_refs}
+
+    def retrieve(self, material: Dict) -> Dict:
+        """
+        根据物料信息检索外部参考数据。
+        目前为按类别硬匹配模拟，之后替换为向量检索。
+        返回：
+            {
+                'price_low': float,
+                'price_high': float,
+                'source': str,
+                'count': int,
+                'available': bool
+            }
+        """
+        category = material.get('category', '')
+        if category in self._refs:
+            ref = self._refs[category]
+            return {
+                'price_low': ref.get('price_low', 0),
+                'price_high': ref.get('price_high', 0),
+                'source': ref.get('source', '模拟数据'),
+                'count': ref.get('sample_count', 1),
+                'available': True,
+            }
+        return {
+            'price_low': 0,
+            'price_high': 0,
+            'source': '无外部数据',
+            'count': 0,
+            'available': False,
+        }
+
+    def calculate_external_deviation(self, quote: float, material: Dict) -> Dict:
+        """
+        计算外部偏离分。
+        公式：(报价 - 参考上限) / 参考上限 × 100%
+        返回包含偏离分和参考区间详情。
+        """
+        ref_data = self.retrieve(material)
+        if not ref_data['available'] or ref_data['price_high'] <= 0:
+            return {
+                'external_deviation': 0.0,
+                'ref_low': 0,
+                'ref_high': 0,
+                'ref_source': '无外部数据',
+                'available': False,
+            }
+
+        ref_high = ref_data['price_high']
+        ref_low = ref_data['price_low']
+
+        if quote > ref_high:
+            deviation = (quote - ref_high) / ref_high * 100
+        elif quote < ref_low:
+            deviation = abs(quote - ref_low) / ref_low * 100
+        else:
+            deviation = 0.0
+
+        return {
+            'external_deviation': round(deviation, 1),
+            'ref_low': ref_low,
+            'ref_high': ref_high,
+            'ref_source': ref_data['source'],
+            'available': True,
+        }
+
+
 class AnomalyScorer(Tool):
-    """偏离度综合打分 Skill"""
+    """偏离度综合打分 Skill — 两层串联打分"""
 
     name = "tool_score_deviation"
     description = (
@@ -442,6 +547,12 @@ class AnomalyScorer(Tool):
         "输出 0-100 的综合偏离度评分。"
         "评分 <20 正常，20-40 关注，40-60 警示，>=60 紧急。"
         "历史数据充足的类别（塑料外壳/PCB板）权重偏向历史数据。"
+        "\n\n"
+        "【两层打分流程】\n"
+        "第一层（偏离度）：α×价格偏离 + β×成本结构偏离 + γ×市场偏离\n"
+        "  → 决定要不要管（触发阈值推送）\n"
+        "第二层（综合打分）：偏离度×0.6 + 外部偏离分×0.4\n"
+        "  → 决定怎么解读异常（外部数据校准置信度）"
     )
     input_schema = {
         "type": "object",
@@ -469,46 +580,71 @@ class AnomalyScorer(Tool):
 
     def __init__(self, external_refs: List[Dict]):
         self.external_refs = {ref['material_category']: ref for ref in external_refs}
+        self._rag = ExternalRAGRetriever(external_refs)
 
     def calculate_deviation(self, quote: float, prediction: Dict,
                           cost_analysis: Dict, material: Dict) -> Dict:
-        """内部打分方法"""
-        pred_mid = prediction.get('p50', quote)
-        price_deviation = abs(quote - pred_mid) / pred_mid * 100 if pred_mid > 0 else 0
-        cost_deviation = cost_analysis.get('cost_deviation_score', 0)
-        market_deviation = self._calculate_market_deviation(quote, material)
+        """
+        两层打分：
 
+        第一层 — 偏离度（判断要不要管）
+            偏离度 = α × 价格偏离分 + β × 成本结构偏离分 + γ × 市场偏离分
+            - 价格偏离分：内部 XGBoost 预测（P50 为基准）
+            - 成本结构偏离分：LLM 成本分析结果
+            - 市场偏离分：外部 RAG 检索（1688 参考上限）
+
+        第二层 — 综合打分（外部数据校准置信度）
+            综合打分 = 偏离度 × 0.6 + 外部偏离分 × 0.4
+            - 外部偏离分：外部 RAG 检索的偏离分，与市场偏离分同源
+            - 作用：内外部都高 → 异常确认；内部高、外部低 → 可能是误报
+        """
         category = material.get('category', '')
+
         if category in ['塑料外壳', 'PCB板']:
             alpha, beta, gamma = 0.5, 0.3, 0.2
         else:
             alpha, beta, gamma = 0.2, 0.2, 0.6
 
-        deviation_score = alpha * price_deviation + beta * cost_deviation + gamma * market_deviation
-        composite_score = price_deviation * 0.6 + market_deviation * 0.4
+        # ---- 第一层三个子分 ----
+        pred_mid = prediction.get('p50', quote)
+        price_deviation = abs(quote - pred_mid) / pred_mid * 100 if pred_mid > 0 else 0
+        cost_deviation = cost_analysis.get('cost_deviation_score', 0)
+
+        rag_result = self._rag.calculate_external_deviation(quote, material)
+        market_deviation = rag_result['external_deviation']
+
+        # ---- 第一层偏离度 ----
+        deviation_score = (alpha * price_deviation
+                         + beta * cost_deviation
+                         + gamma * market_deviation)
+
+        # ---- 第二层综合打分（外部校准） ----
+        external_deviation = rag_result['external_deviation']
+        composite_score = deviation_score * 0.6 + external_deviation * 0.4
+
         severity = self._determine_severity(deviation_score)
 
         return {
+            # 三个子分
             'price_deviation': round(price_deviation, 1),
             'cost_deviation': round(cost_deviation, 1),
             'market_deviation': round(market_deviation, 1),
+            # 第一层
             'deviation_score': round(deviation_score, 1),
-            'composite_score': round(composite_score, 1),
             'severity_level': severity['level'],
             'severity_color': severity['color'],
-            'weights': {'alpha': alpha, 'beta': beta, 'gamma': gamma}
+            'weights': {'alpha': alpha, 'beta': beta, 'gamma': gamma},
+            # 第二层
+            'composite_score': round(composite_score, 1),
+            'external_deviation': round(external_deviation, 1),
+            # RAG 详情
+            'rag': {
+                'ref_low': rag_result['ref_low'],
+                'ref_high': rag_result['ref_high'],
+                'source': rag_result['ref_source'],
+                'available': rag_result['available'],
+            }
         }
-
-    def _calculate_market_deviation(self, quote: float, material: Dict) -> float:
-        category = material.get('category', '')
-        if category in self.external_refs:
-            ref = self.external_refs[category]
-            ref_high = ref.get('price_high', quote * 1.2)
-            if quote > ref_high:
-                return (quote - ref_high) / ref_high * 100
-            elif quote < ref.get('price_low', quote * 0.8):
-                return abs(quote - ref.get('price_low')) / ref.get('price_low') * 100
-        return 0
 
     def _determine_severity(self, score: float) -> Dict:
         if score < 20:
@@ -536,21 +672,35 @@ class AnomalyScorer(Tool):
                 "reasoning": "缺少 prediction 或 cost_analysis 参数",
             }
 
+        mat_category = cost_analysis.get("benchmark_key", "塑料外壳")
         result = self.calculate_deviation(
             quote=supplier_quote,
             prediction=prediction,
             cost_analysis=cost_analysis,
-            material={"id": material_id, "category": "塑料外壳"}
+            material={"id": material_id, "category": mat_category}
         )
+
+        rag_info = result['rag']
+        rag_hint = ""
+        if rag_info['available']:
+            rag_hint = (
+                f"外部参考[{rag_info['source']}] ¥{rag_info['ref_low']}~¥{rag_info['ref_high']}，"
+                f"外部偏离分={result['external_deviation']}%"
+            )
+        else:
+            rag_hint = "无外部数据（RAG未命中）"
+
         return {
             "result": result,
             "confidence": round(self.confidence, 3),
             "reasoning": (
-                f"综合偏离度={result['deviation_score']}（{result['severity_level']}），"
+                f"第一层偏离度={result['deviation_score']}（{result['severity_level']}），"
+                f"第二层综合打分={result['composite_score']}，"
                 f"价格偏离={result['price_deviation']}% / "
                 f"成本偏离={result['cost_deviation']}% / "
                 f"市场偏离={result['market_deviation']}%，"
-                f"权重 α={result['weights']['alpha']} β={result['weights']['beta']} γ={result['weights']['gamma']}"
+                f"权重 α={result['weights']['alpha']} β={result['weights']['beta']} γ={result['weights']['gamma']}。"
+                f"{rag_hint}"
             ),
         }
 
@@ -842,11 +992,12 @@ class AgentOrchestrator:
             return {}
 
         qd = result.get("quote_data", {})
-        pred = result.get("prediction", {})
-        dev = result.get("deviation", {})
-        cost = result.get("cost_analysis", {})
-        sims = result.get("similar_materials", [])
-        sols = result.get("solutions", [])
+        pred = result.get("prediction") or {}
+        dev = result.get("deviation") or {}
+        cost = result.get("cost_analysis") or {}
+        rag = result.get("rag_info") or {}
+        sims = result.get("similar_materials") or []
+        sols = result.get("solutions") or []
 
         trace = result.get("execution_trace", [])
         total_ms = sum(step.get("duration_ms", 0) for step in trace)
@@ -861,12 +1012,24 @@ class AgentOrchestrator:
             "ai_prediction_low": pred.get("p10"),
             "ai_prediction_high": pred.get("p90"),
             "ai_prediction_mid": pred.get("p50"),
+            # 第一层
             "deviation_score": dev.get("deviation_score", 0),
             "severity_level": dev.get("severity_level", "正常"),
             "severity_color": dev.get("severity_color", "#10b981"),
             "price_deviation": dev.get("price_deviation", 0),
             "cost_deviation": dev.get("cost_deviation", 0),
             "market_deviation": dev.get("market_deviation", 0),
+            "weights": dev.get("weights", {}),
+            # 第二层
+            "composite_score": dev.get("composite_score", dev.get("deviation_score", 0)),
+            "external_deviation": dev.get("external_deviation", 0),
+            # RAG 详情
+            "rag_info": {
+                "ref_low": rag.get("ref_low", 0),
+                "ref_high": rag.get("ref_high", 0),
+                "source": rag.get("source", ""),
+                "available": rag.get("available", False),
+            },
             "solutions": sols,
             "cost_breakdown": cost,
             "similar_materials": sims,
@@ -890,6 +1053,7 @@ __all__ = [
     'PricePredictor',
     'CostAnalyzer',
     'AnomalyScorer',
+    'ExternalRAGRetriever',
     'SolutionGenerator',
     'AgentOrchestrator'
 ]

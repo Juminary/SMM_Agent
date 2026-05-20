@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+*.egg
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+
+# Node / Frontend
+node_modules/
+dist/
+.vite/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models / large binaries
+*.pkl
+*.h5
+*.onnx
+*.pt
+*.bin
+
+# Data (keep raw, ignore processed)
+data/processed/
+
+# Logs
+*.log

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Zap,
@@ -33,6 +33,7 @@ const DEMO_NODES = [
     icon: Database,
     color: 'blue',
     colorClass: 'bg-blue-50 border-blue-300 text-blue-600',
+    textClass: 'text-blue-600',
     colorDot: 'bg-blue-500',
     desc: '结构化物料基础信息',
   },
@@ -42,6 +43,7 @@ const DEMO_NODES = [
     icon: Search,
     color: 'purple',
     colorClass: 'bg-purple-50 border-purple-300 text-purple-600',
+    textClass: 'text-purple-600',
     colorDot: 'bg-purple-500',
     desc: '向量检索 Top-5 相似历史报价',
   },
@@ -51,6 +53,7 @@ const DEMO_NODES = [
     icon: Calculator,
     color: 'cyan',
     colorClass: 'bg-cyan-50 border-cyan-300 text-cyan-600',
+    textClass: 'text-cyan-600',
     colorDot: 'bg-cyan-500',
     desc: 'ML 模型预测 P10/P50/P90 区间',
   },
@@ -60,6 +63,7 @@ const DEMO_NODES = [
     icon: BarChart3,
     color: 'amber',
     colorClass: 'bg-amber-50 border-amber-300 text-amber-600',
+    textClass: 'text-amber-600',
     colorDot: 'bg-amber-500',
     desc: '拆解材料/人工/制造/利润占比',
   },
@@ -69,6 +73,7 @@ const DEMO_NODES = [
     icon: TrendingDown,
     color: 'rose',
     colorClass: 'bg-rose-50 border-rose-300 text-rose-600',
+    textClass: 'text-rose-600',
     colorDot: 'bg-rose-500',
     desc: '多维度加权计算综合偏离度',
   },
@@ -78,6 +83,7 @@ const DEMO_NODES = [
     icon: Brain,
     color: 'emerald',
     colorClass: 'bg-emerald-50 border-emerald-300 text-emerald-600',
+    textClass: 'text-emerald-600',
     colorDot: 'bg-emerald-500',
     desc: 'Kimi K2.5 ReAct 工具调用循环',
   },
@@ -145,26 +151,55 @@ export default function Demo() {
   const [selectedSol, setSelectedSol] = useState<string | null>(null)
   const [liveResults, setLiveResults] = useState<{ output: string; duration: number }[]>([])
   const intervalRef = useRef<NodeJS.Timeout | null>(null)
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const isMountedRef = useRef(true)
 
-  const reset = () => {
-    if (intervalRef.current) clearInterval(intervalRef.current)
+  // 组件挂载状态管理
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
+
+  // 清理所有定时器
+  const cleanupTimers = useCallback(() => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current)
+      intervalRef.current = null
+    }
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current)
+      timeoutRef.current = null
+    }
+  }, [])
+
+  const reset = useCallback(() => {
+    cleanupTimers()
     setPhase('intro')
     setCurrentNode(-1)
     setCompletedNodes(new Set())
     setResult(null)
     setLiveResults([])
     setSelectedSol(null)
-  }
+  }, [cleanupTimers])
 
-  const runDemo = async () => {
+  const runDemo = useCallback(() => {
+    // 先清理之前的定时器
+    cleanupTimers()
     setPhase('running')
     setCurrentNode(0)
     setCompletedNodes(new Set())
     setLiveResults([])
+    setResult(null)
 
     // 动画模拟节点执行
     let step = 0
     intervalRef.current = setInterval(() => {
+      if (!isMountedRef.current) {
+        cleanupTimers()
+        return
+      }
       if (step < DEMO_NODES.length) {
         setCurrentNode(step)
         setLiveResults(prev => [...prev, NODE_RESULTS[step]])
@@ -172,30 +207,37 @@ export default function Demo() {
         step++
       } else {
         clearInterval(intervalRef.current!)
+        intervalRef.current = null
       }
     }, 800)
 
-    // 同时调用真实 API
-    try {
-      const res = await analyzeQuote(DEMO_QUOTE)
-      setResult(res)
-    } catch (e) {
-      console.error('Demo API error:', e)
-    }
+    // 同时调用真实 API（添加错误处理，防止 API 失败导致界面崩溃）
+    analyzeQuote(DEMO_QUOTE)
+      .then(res => {
+        if (isMountedRef.current) {
+          setResult(res)
+        }
+      })
+      .catch(e => {
+        console.error('Demo API error:', e)
+        // API 失败不影响演示动画，使用本地模拟结果
+      })
 
     // 等动画跑完再切到完成
-    setTimeout(() => {
-      setPhase('done')
-      setCompletedNodes(new Set(DEMO_NODES.map((_, i) => i)))
-      setCurrentNode(DEMO_NODES.length - 1)
+    timeoutRef.current = setTimeout(() => {
+      if (isMountedRef.current) {
+        setPhase('done')
+        setCompletedNodes(new Set(DEMO_NODES.map((_, i) => i)))
+        setCurrentNode(DEMO_NODES.length - 1)
+      }
     }, DEMO_NODES.length * 800 + 1000)
-  }
+  }, [cleanupTimers])
 
   useEffect(() => {
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
+      cleanupTimers()
     }
-  }, [])
+  }, [cleanupTimers])
 
   const isNodeActive = (idx: number) => {
     if (phase === 'intro') return false
@@ -218,7 +260,7 @@ export default function Demo() {
     return 'opacity-30'
   }
 
-  const totalDuration = liveResults.reduce((s, r) => s + r.duration, 0)
+  const totalDuration = liveResults.reduce((s, r) => s + (r?.duration || 0), 0)
 
   return (
     <div className="h-full overflow-auto bg-gradient-to-br from-slate-50 to-blue-50">
@@ -384,16 +426,18 @@ export default function Demo() {
         </div>
 
         {/* 节点详细输出 */}
-        {liveResults.length > 0 && (
+        {liveResults.filter(Boolean).length > 0 && (
           <div className="mb-8 p-4 bg-white border border-gray-200 rounded-xl shadow-sm">
             <div className="text-sm font-medium text-gray-700 mb-3">执行详情</div>
             <div className="space-y-2">
-              {liveResults.map((r, idx) => {
+              {liveResults.filter(Boolean).map((r, idx) => {
+                if (!r) return null
                 const node = DEMO_NODES[idx]
+                if (!node) return null
                 const Icon = node.icon
                 return (
                   <div key={idx} className="flex items-start gap-3 p-3 bg-gray-50 rounded-lg">
-                    <Icon className="w-4 h-4 mt-0.5 flex-shrink-0" style={{ color: `var(--tw-${node.color})` }} />
+                    <Icon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${node.textClass}`} />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-medium text-gray-900">{node.label}</span>

@@ -33,8 +33,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 数据路径
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "raw")
+# 数据路径（相对于项目根目录 /Users/jrz/Desktop/SMM_Agent）
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.join(_BACKEND_DIR, "..", "..")
+DATA_DIR = os.path.join(_PROJECT_ROOT, "data", "raw")
 MATERIALS_PATH = os.path.join(DATA_DIR, "materials.json")
 QUOTES_PATH = os.path.join(DATA_DIR, "quotes.json")
 EXTERNAL_REFS_PATH = os.path.join(DATA_DIR, "external_references.json")
@@ -142,14 +144,18 @@ async def get_material(material_id: str):
 async def analyze_quote(quote_input: QuoteInput):
     """分析报价异常"""
     try:
-        # 调用Agent处理
-        result = agent.process_quote(quote_input.dict())
+        import asyncio
+        result = await asyncio.wait_for(
+            asyncio.to_thread(agent.process_quote, quote_input.dict()),
+            timeout=120.0
+        )
 
-        # 保存到内存
         quotes_db[result['id']] = result
         execution_traces_db[result['id']] = result['execution_trace']
 
         return result
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="分析超时，请稍后重试")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -241,7 +247,6 @@ async def rerun_analysis(quote_id: str, rerun_input: RerunInput):
 
     old_quote = quotes_db[quote_id]
 
-    # 使用新参数重新分析
     quote_input = {
         'material_id': old_quote['material_id'],
         'material_name': old_quote['material_name'],
@@ -257,13 +262,19 @@ async def rerun_analysis(quote_id: str, rerun_input: RerunInput):
         'description': rerun_input.params.get('description', '')
     }
 
-    # 重新分析
-    result = agent.process_quote(quote_input)
+    import asyncio
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(agent.process_quote, quote_input),
+            timeout=120.0
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="分析超时，请稍后重试")
+
     result['id'] = f"{quote_id}-rerun-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     result['original_quote_id'] = quote_id
     result['rerun_params'] = rerun_input.params
 
-    # 保存
     quotes_db[result['id']] = result
 
     return result
