@@ -1,0 +1,171 @@
+{
+  "external_references": [
+    {
+      "id": "EXT-001",
+      "material_category": "塑料外壳",
+      "material_type": "ABS",
+      "source": "1688平台",
+      "reference_name": "ABS注塑外壳 80×60×15mm",
+      "price_low": 3.80,
+      "price_high": 6.50,
+      "sample_count": 32,
+      "url": "https://detail.1688.com/xxx",
+      "last_updated": "2024-05-10",
+      "reliability": 0.85
+    },
+    {
+      "id": "EXT-002",
+      "material_category": "塑料外壳",
+      "material_type": "ABS",
+      "source": "1688平台",
+      "reference_name": "ABS注塑支架 75×55×12mm",
+      "price_low": 3.20,
+      "price_high": 5.80,
+      "sample_count": 28,
+      "url": "https://detail.1688.com/xxx",
+      "last_updated": "2024-05-08",
+      "reliability": 0.82
+    },
+    {
+      "id": "EXT-003",
+      "material_category": "显示屏",
+      "material_type": "LCD",
+      "source": "阿里国际站",
+      "reference_name": "LCD段码屏 4位半 COB封装",
+      "price_low": 4.50,
+      "price_high": 7.20,
+      "sample_count": 45,
+      "url": "https://www.alibaba.com/xxx",
+      "last_updated": "2024-05-12",
+      "reliability": 0.88
+    },
+    {
+      "id": "EXT-004",
+      "material_category": "PCB板",
+      "material_type": "FR-4",
+      "source": "行业报告",
+      "reference_name": "双面板沉金工艺 60×40mm",
+      "price_low": 7.50,
+      "price_high": 10.20,
+      "sample_count": 28,
+      "url": "https://report.pcb-industry.com/2024",
+      "last_updated": "2024-05-01",
+      "reliability": 0.90
+    },
+    {
+      "id": "EXT-005",
+      "material_category": "传感器",
+      "material_type": "MEMS",
+      "source": "行业报告",
+      "reference_name": "MEMS压力传感器 医疗级",
+      "price_low": 10.50,
+      "price_high": 15.00,
+      "sample_count": 12,
+      "url": "https://report.sensor-industry.com/2024",
+      "last_updated": "2024-04-28",
+      "reliability": 0.87
+    },
+    {
+      "id": "EXT-006",
+      "material_category": "按键",
+      "material_type": "硅胶",
+      "source": "1688平台",
+      "reference_name": "硅胶按键组 三键一体",
+      "price_low": 0.65,
+      "price_high": 0.95,
+      "sample_count": 45,
+      "url": "https://detail.1688.com/xxx",
+      "last_updated": "2024-05-11",
+      "reliability": 0.80
+    },
+    {
+      "id": "EXT-007",
+      "material_category": "袖带",
+      "material_type": "尼龙+TPU",
+      "source": "1688平台",
+      "reference_name": "血压计袖带 22-32cm",
+      "price_low": 6.50,
+      "price_high": 10.80,
+      "sample_count": 18,
+      "url": "https://detail.1688.com/xxx",
+      "last_updated": "2024-05-09",
+      "reliability": 0.78
+    },
+    {
+      "id": "EXT-008",
+      "material_category": "电机",
+      "material_type": "直流电机",
+      "source": "1688平台",
+      "reference_name": "微型充气泵 6V直流",
+      "price_low": 5.50,
+      "price_high": 8.20,
+      "sample_count": 35,
+      "url": "https://detail.1688.com/xxx",
+      "last_updated": "2024-05-10",
+      "reliability": 0.83
+    },
+    {
+      "id": "EXT-009",
+      "material_category": "连接器",
+      "material_type": "磷铜",
+      "source": "1688平台",
+      "reference_name": "血糖试纸连接器 镀金",
+      "price_low": 1.50,
+      "price_high": 2.50,
+      "sample_count": 52,
+      "url": "https://detail.1688.com/xxx",
+      "last_updated": "2024-05-12",
+      "reliability": 0.85
+    },
+    {
+      "id": "EXT-010",
+      "material_category": "包装",
+      "material_type": "白卡纸",
+      "source": "1688平台",
+      "reference_name": "医疗器械彩盒 150×100×50mm",
+      "price_low": 1.00,
+      "price_high": 1.80,
+      "sample_count": 68,
+      "url": "https://detail.1688.com/xxx",
+      "last_updated": "2024-05-11",
+      "reliability": 0.82
+    }
+  ],
+  "industry_benchmarks": {
+    "plastic_injection": {
+      "raw_material_pct": 40,
+      "processing_pct": 25,
+      "surface_treatment_pct": 10,
+      "packaging_pct": 5,
+      "management_profit_pct": 20
+    },
+    "pcb": {
+      "raw_material_pct": 22,
+      "processing_pct": 48,
+      "surface_treatment_pct": 20,
+      "packaging_pct": 3,
+      "management_profit_pct": 7
+    },
+    "sensor": {
+      "raw_material_pct": 50,
+      "processing_pct": 25,
+      "surface_treatment_pct": 0,
+      "packaging_pct": 5,
+      "management_profit_pct": 20
+    },
+    "silicone": {
+      "raw_material_pct": 42,
+      "processing_pct": 28,
+      "surface_treatment_pct": 0,
+      "packaging_pct": 8,
+      "management_profit_pct": 22
+    },
+    "cuff": {
+      "raw_material_pct": 42,
+      "processing_pct": 30,
+      "surface_treatment_pct": 0,
+      "packaging_pct": 8,
+      "management_profit_pct": 20
+    }
+  }
+}

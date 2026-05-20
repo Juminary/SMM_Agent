@@ -1,0 +1,334 @@
+{
+  "quotes": [
+    {
+      "id": "Q-001",
+      "material_id": "MAT-001",
+      "material_name": "ABS注塑外壳",
+      "supplier_quote": 8.50,
+      "supplier_name": "新供应商A",
+      "quote_date": "2024-05-15",
+      "quantity": 50000,
+      "ai_prediction_low": 4.20,
+      "ai_prediction_high": 5.10,
+      "ai_prediction_mid": 4.65,
+      "deviation_score": 71,
+      "severity_level": "紧急",
+      "severity_color": "#f43f5e",
+      "solutions": [
+        {
+          "id": "SOL-001-A",
+          "title": "直接议价",
+          "description": "当前报价¥8.50 vs AI预测上限¥5.10，偏离+67%。建议以¥4.80为目标进行议价，提供同类物料历史采购价作为议价依据。",
+          "confidence": 0.85,
+          "estimated_savings": "¥185,000"
+        },
+        {
+          "id": "SOL-001-B",
+          "title": "二次询价",
+          "description": "单一供应商报价，无法判断是否具有代表性。建议向其他2-3家同类供应商发起二次询价，当前报价偏离市场均值+52%。",
+          "confidence": 0.72,
+          "estimated_savings": "待定"
+        },
+        {
+          "id": "SOL-001-C",
+          "title": "升级处理",
+          "description": "偏离度>60%，超出工程师自主处理权限。建议上报采购经理，进行专项评审。附件：完整的异常分析报告（自动生成）。",
+          "confidence": 0.90,
+          "estimated_savings": "需评审"
+        }
+      ],
+      "cost_breakdown": {
+        "cost_items": [
+          {"item": "原材料", "supplier_pct": 42, "benchmark_pct": 40, "deviation": 5, "status": "正常"},
+          {"item": "加工费", "supplier_pct": 18, "benchmark_pct": 25, "deviation": 28, "status": "偏低"},
+          {"item": "表面处理", "supplier_pct": 12, "benchmark_pct": 10, "deviation": 20, "status": "略高"},
+          {"item": "包装物流", "supplier_pct": 5, "benchmark_pct": 5, "deviation": 0, "status": "正常"},
+          {"item": "管理+利润", "supplier_pct": 35, "benchmark_pct": 20, "deviation": 75, "status": "严重偏高"}
+        ],
+        "cost_deviation_score": 75,
+        "benchmark_key": "plastic_injection"
+      },
+      "similar_materials": [
+        {"id": "MAT-001", "name": "ABS注塑外壳", "price": 3.20, "similarity": 1.0, "date": "2024-03-15"},
+        {"id": "MAT-002", "name": "ABS注塑支架", "price": 2.90, "similarity": 0.87, "date": "2024-01-20"},
+        {"id": "MAT-009", "name": "下外壳+电池仓", "price": 3.80, "similarity": 0.82, "date": "2024-03-15"}
+      ],
+      "external_reference": {
+        "source": "1688平台",
+        "reference_low": 3.80,
+        "reference_high": 6.50,
+        "sample_count": 32,
+        "deviation_from_external": 31
+      },
+      "status": "pending",
+      "human_decision": null,
+      "decision_by": null,
+      "created_at": "2024-05-15T10:30:00Z",
+      "execution_trace": [
+        {"step": "异常检测", "status": "completed", "timestamp": "2024-05-15T10:30:01Z", "duration_ms": 120},
+        {"step": "相似物料检索", "status": "completed", "timestamp": "2024-05-15T10:30:02Z", "duration_ms": 450, "output": "Top-3相似物料"},
+        {"step": "价格区间预测", "status": "completed", "timestamp": "2024-05-15T10:30:03Z", "duration_ms": 280, "output": "P10=4.20, P50=4.65, P90=5.10"},
+        {"step": "成本结构拆解", "status": "completed", "timestamp": "2024-05-15T10:30:04Z", "duration_ms": 890, "output": "成本结构分析完成"},
+        {"step": "偏离度综合打分", "status": "completed", "timestamp": "2024-05-15T10:30:05Z", "duration_ms": 150, "output": "偏离度71分"},
+        {"step": "方案生成", "status": "completed", "timestamp": "2024-05-15T10:30:06Z", "duration_ms": 1200, "output": "3个应对方案"}
+      ]
+    },
+    {
+      "id": "Q-002",
+      "material_id": "MAT-004",
+      "material_name": "主控PCB板",
+      "supplier_quote": 6.20,
+      "supplier_name": "电路通科技",
+      "quote_date": "2024-05-14",
+      "quantity": 25000,
+      "ai_prediction_low": 7.80,
+      "ai_prediction_high": 9.50,
+      "ai_prediction_mid": 8.65,
+      "deviation_score": 23,
+      "severity_level": "关注",
+      "severity_color": "#f59e0b",
+      "solutions": [
+        {
+          "id": "SOL-002-A",
+          "title": "接受报价",
+          "description": "报价¥6.20低于AI预测区间下限¥7.80，偏离-28%。建议核实供应商是否理解完整工艺要求，确认无遗漏后可直接接受。",
+          "confidence": 0.78,
+          "estimated_savings": "¥62,500"
+        },
+        {
+          "id": "SOL-002-B",
+          "title": "工艺确认",
+          "description": "报价偏低，建议与供应商确认是否包含沉金工艺、测试费用等。可能存在工艺理解偏差。",
+          "confidence": 0.65,
+          "estimated_savings": "风险规避"
+        }
+      ],
+      "cost_breakdown": {
+        "cost_items": [
+          {"item": "原材料", "supplier_pct": 22, "benchmark_pct": 22, "deviation": 0, "status": "正常"},
+          {"item": "加工费", "supplier_pct": 48, "benchmark_pct": 48, "deviation": 0, "status": "正常"},
+          {"item": "表面处理", "supplier_pct": 20, "benchmark_pct": 20, "deviation": 0, "status": "正常"},
+          {"item": "包装物流", "supplier_pct": 3, "benchmark_pct": 3, "deviation": 0, "status": "正常"},
+          {"item": "管理+利润", "supplier_pct": 7, "benchmark_pct": 10, "deviation": 30, "status": "偏低"}
+        ],
+        "cost_deviation_score": 30,
+        "benchmark_key": "pcb"
+      },
+      "similar_materials": [
+        {"id": "MAT-004", "name": "主控PCB板", "price": 8.50, "similarity": 1.0, "date": "2024-04-05"},
+        {"id": "MAT-010", "name": "PCB板-体温计", "price": 4.20, "similarity": 0.65, "date": "2024-02-15"}
+      ],
+      "external_reference": {
+        "source": "1688平台",
+        "reference_low": 7.50,
+        "reference_high": 10.20,
+        "sample_count": 28,
+        "deviation_from_external": -35
+      },
+      "status": "pending",
+      "human_decision": null,
+      "decision_by": null,
+      "created_at": "2024-05-14T14:20:00Z",
+      "execution_trace": [
+        {"step": "异常检测", "status": "completed", "timestamp": "2024-05-14T14:20:01Z", "duration_ms": 110},
+        {"step": "相似物料检索", "status": "completed", "timestamp": "2024-05-14T14:20:02Z", "duration_ms": 380, "output": "Top-2相似物料"},
+        {"step": "价格区间预测", "status": "completed", "timestamp": "2024-05-14T14:20:03Z", "duration_ms": 260, "output": "P10=7.80, P50=8.65, P90=9.50"},
+        {"step": "成本结构拆解", "status": "completed", "timestamp": "2024-05-14T14:20:04Z", "duration_ms": 720, "output": "成本结构分析完成"},
+        {"step": "偏离度综合打分", "status": "completed", "timestamp": "2024-05-14T14:20:05Z", "duration_ms": 140, "output": "偏离度23分"},
+        {"step": "方案生成", "status": "completed", "timestamp": "2024-05-14T14:20:06Z", "duration_ms": 980, "output": "2个应对方案"}
+      ]
+    },
+    {
+      "id": "Q-003",
+      "material_id": "MAT-006",
+      "material_name": "硅胶按键组",
+      "supplier_quote": 0.75,
+      "supplier_name": "橡塑制品厂",
+      "quote_date": "2024-05-13",
+      "quantity": 60000,
+      "ai_prediction_low": 0.70,
+      "ai_prediction_high": 0.90,
+      "ai_prediction_mid": 0.80,
+      "deviation_score": 8,
+      "severity_level": "正常",
+      "severity_color": "#10b981",
+      "solutions": [
+        {
+          "id": "SOL-003-A",
+          "title": "直接通过",
+          "description": "报价¥0.75在AI预测区间¥0.70-0.90内，偏离度仅8分。与历史采购价一致，可直接通过。",
+          "confidence": 0.92,
+          "estimated_savings": "¥0"
+        }
+      ],
+      "cost_breakdown": {
+        "cost_items": [
+          {"item": "原材料", "supplier_pct": 42, "benchmark_pct": 42, "deviation": 0, "status": "正常"},
+          {"item": "加工费", "supplier_pct": 28, "benchmark_pct": 28, "deviation": 0, "status": "正常"},
+          {"item": "表面处理", "supplier_pct": 0, "benchmark_pct": 0, "deviation": 0, "status": "正常"},
+          {"item": "包装物流", "supplier_pct": 8, "benchmark_pct": 8, "deviation": 0, "status": "正常"},
+          {"item": "管理+利润", "supplier_pct": 22, "benchmark_pct": 22, "deviation": 0, "status": "正常"}
+        ],
+        "cost_deviation_score": 0,
+        "benchmark_key": "silicone"
+      },
+      "similar_materials": [
+        {"id": "MAT-006", "name": "硅胶按键组", "price": 0.75, "similarity": 1.0, "date": "2024-02-28"}
+      ],
+      "external_reference": {
+        "source": "1688平台",
+        "reference_low": 0.65,
+        "reference_high": 0.95,
+        "sample_count": 45,
+        "deviation_from_external": 0
+      },
+      "status": "approved",
+      "human_decision": "accept",
+      "decision_by": "张工程师",
+      "created_at": "2024-05-13T09:00:00Z",
+      "execution_trace": [
+        {"step": "异常检测", "status": "completed", "timestamp": "2024-05-13T09:00:01Z", "duration_ms": 95},
+        {"step": "相似物料检索", "status": "completed", "timestamp": "2024-05-13T09:00:02Z", "duration_ms": 320, "output": "Top-1相似物料"},
+        {"step": "价格区间预测", "status": "completed", "timestamp": "2024-05-13T09:00:03Z", "duration_ms": 210, "output": "P10=0.70, P50=0.80, P90=0.90"},
+        {"step": "成本结构拆解", "status": "completed", "timestamp": "2024-05-13T09:00:04Z", "duration_ms": 580, "output": "成本结构分析完成"},
+        {"step": "偏离度综合打分", "status": "completed", "timestamp": "2024-05-13T09:00:05Z", "duration_ms": 120, "output": "偏离度8分"},
+        {"step": "方案生成", "status": "completed", "timestamp": "2024-05-13T09:00:06Z", "duration_ms": 650, "output": "1个应对方案"}
+      ]
+    },
+    {
+      "id": "Q-004",
+      "material_id": "MAT-007",
+      "material_name": "血压计袖带",
+      "supplier_quote": 12.50,
+      "supplier_name": "新供应商B",
+      "quote_date": "2024-05-12",
+      "quantity": 35000,
+      "ai_prediction_low": 6.20,
+      "ai_prediction_high": 9.50,
+      "ai_prediction_mid": 7.85,
+      "deviation_score": 45,
+      "severity_level": "警示",
+      "severity_color": "#f97316",
+      "solutions": [
+        {
+          "id": "SOL-004-A",
+          "title": "议价谈判",
+          "description": "报价¥12.50高于AI预测上限¥9.50，偏离+32%。建议以¥8.00为目标进行议价，重点协商缝制工时费用。",
+          "confidence": 0.80,
+          "estimated_savings": "¥157,500"
+        },
+        {
+          "id": "SOL-004-B",
+          "title": "工艺优化",
+          "description": "袖带缝制工时占比高，建议与供应商探讨自动化缝制或简化工艺的可能性。",
+          "confidence": 0.68,
+          "estimated_savings": "¥87,500"
+        },
+        {
+          "id": "SOL-004-C",
+          "title": "备选供应商",
+          "description": "建议开发2-3家备选供应商，当前报价偏离市场均值+28%，存在议价空间。",
+          "confidence": 0.75,
+          "estimated_savings": "待定"
+        }
+      ],
+      "cost_breakdown": {
+        "cost_items": [
+          {"item": "原材料", "supplier_pct": 45, "benchmark_pct": 42, "deviation": 7, "status": "略高"},
+          {"item": "加工费", "supplier_pct": 35, "benchmark_pct": 30, "deviation": 17, "status": "偏高"},
+          {"item": "表面处理", "supplier_pct": 0, "benchmark_pct": 0, "deviation": 0, "status": "正常"},
+          {"item": "包装物流", "supplier_pct": 8, "benchmark_pct": 8, "deviation": 0, "status": "正常"},
+          {"item": "管理+利润", "supplier_pct": 12, "benchmark_pct": 10, "deviation": 20, "status": "略高"}
+        ],
+        "cost_deviation_score": 20,
+        "benchmark_key": "cuff"
+      },
+      "similar_materials": [
+        {"id": "MAT-007", "name": "血压计袖带", "price": 7.50, "similarity": 1.0, "date": "2024-01-15"}
+      ],
+      "external_reference": {
+        "source": "1688平台",
+        "reference_low": 6.50,
+        "reference_high": 10.80,
+        "sample_count": 18,
+        "deviation_from_external": 16
+      },
+      "status": "pending",
+      "human_decision": null,
+      "decision_by": null,
+      "created_at": "2024-05-12T16:30:00Z",
+      "execution_trace": [
+        {"step": "异常检测", "status": "completed", "timestamp": "2024-05-12T16:30:01Z", "duration_ms": 105},
+        {"step": "相似物料检索", "status": "completed", "timestamp": "2024-05-12T16:30:02Z", "duration_ms": 410, "output": "Top-1相似物料"},
+        {"step": "价格区间预测", "status": "completed", "timestamp": "2024-05-12T16:30:03Z", "duration_ms": 275, "output": "P10=6.20, P50=7.85, P90=9.50"},
+        {"step": "成本结构拆解", "status": "completed", "timestamp": "2024-05-12T16:30:04Z", "duration_ms": 820, "output": "成本结构分析完成"},
+        {"step": "偏离度综合打分", "status": "completed", "timestamp": "2024-05-12T16:30:05Z", "duration_ms": 135, "output": "偏离度45分"},
+        {"step": "方案生成", "status": "completed", "timestamp": "2024-05-12T16:30:06Z", "duration_ms": 1050, "output": "3个应对方案"}
+      ]
+    },
+    {
+      "id": "Q-005",
+      "material_id": "MAT-005",
+      "material_name": "压力传感器模组",
+      "supplier_quote": 15.80,
+      "supplier_name": "芯感科技",
+      "quote_date": "2024-05-11",
+      "quantity": 20000,
+      "ai_prediction_low": 11.50,
+      "ai_prediction_high": 14.20,
+      "ai_prediction_mid": 12.85,
+      "deviation_score": 52,
+      "severity_level": "警示",
+      "severity_color": "#f97316",
+      "solutions": [
+        {
+          "id": "SOL-005-A",
+          "title": "技术评审",
+          "description": "报价¥15.80高于AI预测上限¥14.20，偏离+11%。MEMS传感器涉及医疗级认证，建议技术部门评审认证成本合理性。",
+          "confidence": 0.82,
+          "estimated_savings": "¥32,000"
+        },
+        {
+          "id": "SOL-005-B",
+          "title": "批量议价",
+          "description": "当前订单量2万只，建议承诺年度采购量提升至5万只，争取单价降至¥13.50。",
+          "confidence": 0.75,
+          "estimated_savings": "¥46,000"
+        }
+      ],
+      "cost_breakdown": {
+        "cost_items": [
+          {"item": "原材料", "supplier_pct": 55, "benchmark_pct": 50, "deviation": 10, "status": "略高"},
+          {"item": "加工费", "supplier_pct": 25, "benchmark_pct": 25, "deviation": 0, "status": "正常"},
+          {"item": "表面处理", "supplier_pct": 0, "benchmark_pct": 0, "deviation": 0, "status": "正常"},
+          {"item": "包装物流", "supplier_pct": 5, "benchmark_pct": 5, "deviation": 0, "status": "正常"},
+          {"item": "管理+利润", "supplier_pct": 15, "benchmark_pct": 15, "deviation": 0, "status": "正常"}
+        ],
+        "cost_deviation_score": 10,
+        "benchmark_key": "sensor"
+      },
+      "similar_materials": [
+        {"id": "MAT-005", "name": "压力传感器模组", "price": 12.80, "similarity": 1.0, "date": "2024-03-01"}
+      ],
+      "external_reference": {
+        "source": "行业报告",
+        "reference_low": 10.50,
+        "reference_high": 15.00,
+        "sample_count": 12,
+        "deviation_from_external": 5
+      },
+      "status": "pending",
+      "human_decision": null,
+      "decision_by": null,
+      "created_at": "2024-05-11T11:00:00Z",
+      "execution_trace": [
+        {"step": "异常检测", "status": "completed", "timestamp": "2024-05-11T11:00:01Z", "duration_ms": 115},
+        {"step": "相似物料检索", "status": "completed", "timestamp": "2024-05-11T11:00:02Z", "duration_ms": 390, "output": "Top-1相似物料"},
+        {"step": "价格区间预测", "status": "completed", "timestamp": "2024-05-11T11:00:03Z", "duration_ms": 285, "output": "P10=11.50, P50=12.85, P90=14.20"},
+        {"step": "成本结构拆解", "status": "completed", "timestamp": "2024-05-11T11:00:04Z", "duration_ms": 760, "output": "成本结构分析完成"},
+        {"step": "偏离度综合打分", "status": "completed", "timestamp": "2024-05-11T11:00:05Z", "duration_ms": 145, "output": "偏离度52分"},
+        {"step": "方案生成", "status": "completed", "timestamp": "2024-05-11T11:00:06Z", "duration_ms": 920, "output": "2个应对方案"}
+      ]
+    }
+  ]
+}
