@@ -33,32 +33,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 数据路径（相对于项目根目录 /Users/jrz/Desktop/SMM_Agent）
-_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.join(_BACKEND_DIR, "..", "..")
-DATA_DIR = os.path.join(_PROJECT_ROOT, "data", "raw")
-MATERIALS_PATH = os.path.join(DATA_DIR, "materials.json")
-QUOTES_PATH = os.path.join(DATA_DIR, "quotes.json")
-EXTERNAL_REFS_PATH = os.path.join(DATA_DIR, "external_references.json")
+# 数据库初始化
+from app.db.database import init_db, get_connection
+from app.db.database import (
+    get_all_quotes, get_quote_by_id, insert_quote,
+    update_quote_decision, get_quote_stats,
+    get_all_materials, get_material_by_id, get_materials_by_category,
+    get_all_external_refs, get_external_refs_by_category,
+    get_all_benchmarks,
+)
 
-# 初始化Agent
-agent = AgentOrchestrator(MATERIALS_PATH, EXTERNAL_REFS_PATH)
+init_db()
 
-# 内存存储（演示用）
-quotes_db = {}
-execution_traces_db = {}
-
-# 加载已有报价数据
-def load_quotes():
-    try:
-        with open(QUOTES_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            for quote in data.get('quotes', []):
-                quotes_db[quote['id']] = quote
-    except:
-        pass
-
-load_quotes()
+# 初始化Agent（不再需要传 JSON 路径，Agent 内部从 DB 读取）
+agent = AgentOrchestrator()
 
 
 # ============ Pydantic模型 ============
@@ -108,13 +96,11 @@ async def get_materials(
 ):
     """获取物料列表"""
     try:
-        with open(MATERIALS_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            materials = data.get('materials', [])
-
-        if category:
-            materials = [m for m in materials if m['category'] == category]
-
+        with get_connection() as conn:
+            if category:
+                materials = get_materials_by_category(conn, category)
+            else:
+                materials = get_all_materials(conn)
         return {
             "total": len(materials),
             "materials": materials[:limit]
@@ -127,15 +113,13 @@ async def get_materials(
 async def get_material(material_id: str):
     """获取单个物料详情"""
     try:
-        with open(MATERIALS_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            materials = data.get('materials', [])
-
-        for m in materials:
-            if m['id'] == material_id:
-                return m
-
-        raise HTTPException(status_code=404, detail="物料不存在")
+        with get_connection() as conn:
+            material = get_material_by_id(conn, material_id)
+        if not material:
+            raise HTTPException(status_code=404, detail="物料不存在")
+        return material
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -149,10 +133,7 @@ async def analyze_quote(quote_input: QuoteInput):
             asyncio.to_thread(agent.process_quote, quote_input.dict()),
             timeout=120.0
         )
-
-        quotes_db[result['id']] = result
-        execution_traces_db[result['id']] = result['execution_trace']
-
+        # agent.process_quote 内部已持久化到数据库
         return result
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="分析超时，请稍后重试")
@@ -167,74 +148,57 @@ async def get_quotes(
     limit: int = Query(default=20, le=100)
 ):
     """获取报价异常列表"""
-    quotes = list(quotes_db.values())
-
-    if status:
-        quotes = [q for q in quotes if q.get('status') == status]
-    if severity:
-        quotes = [q for q in quotes if q.get('severity_level') == severity]
-
-    # 按时间倒序
-    quotes.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+    with get_connection() as conn:
+        quotes = get_all_quotes(conn, status=status, severity=severity, limit=limit)
+        total = len(get_all_quotes(conn, status=status, severity=severity, limit=1000))
 
     return {
-        "total": len(quotes),
-        "quotes": quotes[:limit]
+        "total": total,
+        "quotes": quotes
     }
 
 
 @app.get("/api/quotes/{quote_id}")
 async def get_quote(quote_id: str):
     """获取单个报价详情"""
-    if quote_id not in quotes_db:
+    with get_connection() as conn:
+        quote = get_quote_by_id(conn, quote_id)
+    if not quote:
         raise HTTPException(status_code=404, detail="报价不存在")
-    return quotes_db[quote_id]
+    return quote
 
 
 @app.post("/api/quotes/{quote_id}/decision")
 async def make_decision(quote_id: str, decision_input: DecisionInput):
     """提交人工决策"""
-    if quote_id not in quotes_db:
+    with get_connection() as conn:
+        quote = update_quote_decision(
+            conn, quote_id, decision_input.decision,
+            decision_input.decision_by,
+            decision_input.override_price,
+            decision_input.override_reason,
+            decision_input.selected_solution_id,
+        )
+    if not quote:
         raise HTTPException(status_code=404, detail="报价不存在")
-
-    quote = quotes_db[quote_id]
-
-    # 标准化决策值
-    decision_map = {
-        'accept': 'approved',
-        'reject': 'rejected',
-        'negotiate': 'negotiate'
-    }
-    normalized_decision = decision_map.get(decision_input.decision, decision_input.decision)
-
-    quote['status'] = normalized_decision
-    quote['human_decision'] = decision_input.decision
-    quote['decision_by'] = decision_input.decision_by
-    quote['decision_at'] = datetime.now().isoformat()
-
-    if decision_input.override_price:
-        quote['override_price'] = decision_input.override_price
-    if decision_input.override_reason:
-        quote['override_reason'] = decision_input.override_reason
-    if decision_input.selected_solution_id:
-        quote['selected_solution_id'] = decision_input.selected_solution_id
-
     return quote
 
 
 @app.get("/api/quotes/{quote_id}/trace")
 async def get_execution_trace(quote_id: str):
     """获取执行轨迹"""
-    if quote_id not in quotes_db:
+    with get_connection() as conn:
+        quote = get_quote_by_id(conn, quote_id)
+    if not quote:
         raise HTTPException(status_code=404, detail="报价不存在")
 
-    quote = quotes_db[quote_id]
+    trace = quote.get('execution_trace', [])
     return {
         "quote_id": quote_id,
-        "execution_trace": quote.get('execution_trace', []),
+        "execution_trace": trace if trace else [],
         "total_duration_ms": sum(
             step.get('duration_ms', 0)
-            for step in quote.get('execution_trace', [])
+            for step in (trace if trace else [])
         )
     }
 
@@ -242,17 +206,17 @@ async def get_execution_trace(quote_id: str):
 @app.post("/api/quotes/{quote_id}/rerun")
 async def rerun_analysis(quote_id: str, rerun_input: RerunInput):
     """重跑分析（带参数调整）"""
-    if quote_id not in quotes_db:
+    with get_connection() as conn:
+        old_quote = get_quote_by_id(conn, quote_id)
+    if not old_quote:
         raise HTTPException(status_code=404, detail="报价不存在")
 
-    old_quote = quotes_db[quote_id]
-
     quote_input = {
-        'material_id': old_quote['material_id'],
-        'material_name': old_quote['material_name'],
-        'supplier_quote': rerun_input.params.get('supplier_quote', old_quote['supplier_quote']),
-        'supplier_name': old_quote['supplier_name'],
-        'quantity': rerun_input.params.get('quantity', old_quote['quantity']),
+        'material_id': old_quote.get('material_id', ''),
+        'material_name': old_quote.get('material_name', ''),
+        'supplier_quote': rerun_input.params.get('supplier_quote', old_quote.get('supplier_quote', 0)),
+        'supplier_name': old_quote.get('supplier_name', ''),
+        'quantity': rerun_input.params.get('quantity', old_quote.get('quantity', 0)),
         'quote_date': old_quote.get('quote_date', datetime.now().strftime('%Y-%m-%d')),
         'category': rerun_input.params.get('category', '塑料外壳'),
         'material_type': rerun_input.params.get('material_type', 'ABS'),
@@ -271,11 +235,12 @@ async def rerun_analysis(quote_id: str, rerun_input: RerunInput):
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="分析超时，请稍后重试")
 
+    # 标记为重跑结果
     result['id'] = f"{quote_id}-rerun-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     result['original_quote_id'] = quote_id
-    result['rerun_params'] = rerun_input.params
 
-    quotes_db[result['id']] = result
+    with get_connection() as conn:
+        insert_quote(conn, result)
 
     return result
 
@@ -286,13 +251,8 @@ async def get_external_references(
 ):
     """获取外部参考数据"""
     try:
-        with open(EXTERNAL_REFS_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            refs = data.get('external_references', [])
-
-        if category:
-            refs = [r for r in refs if r['material_category'] == category]
-
+        with get_connection() as conn:
+            refs = get_external_refs_by_category(conn, category)
         return {
             "total": len(refs),
             "references": refs
@@ -305,9 +265,9 @@ async def get_external_references(
 async def get_benchmarks():
     """获取行业基准数据"""
     try:
-        with open(EXTERNAL_REFS_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data.get('industry_benchmarks', {})
+        with get_connection() as conn:
+            benchmarks = get_all_benchmarks(conn)
+        return benchmarks
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -315,38 +275,9 @@ async def get_benchmarks():
 @app.get("/api/stats")
 async def get_stats():
     """获取统计信息"""
-    quotes = list(quotes_db.values())
-
-    severity_counts = {}
-    status_counts = {}
-    total_potential_savings = 0
-
-    for q in quotes:
-        severity = q.get('severity_level', '未知')
-        severity_counts[severity] = severity_counts.get(severity, 0) + 1
-
-        status = q.get('status', 'pending')
-        status_counts[status] = status_counts.get(status, 0) + 1
-
-        # 计算潜在节省
-        for sol in q.get('solutions', []):
-            savings_str = sol.get('estimated_savings', '¥0')
-            if savings_str.startswith('¥') and '待' not in savings_str:
-                try:
-                    savings = float(savings_str.replace('¥', '').replace(',', ''))
-                    total_potential_savings += savings
-                except:
-                    pass
-
-    return {
-        "total_quotes": len(quotes),
-        "severity_distribution": severity_counts,
-        "status_distribution": status_counts,
-        "total_potential_savings": round(total_potential_savings, 2),
-        "avg_deviation_score": round(
-            sum(q.get('deviation_score', 0) for q in quotes) / len(quotes), 2
-        ) if quotes else 0
-    }
+    with get_connection() as conn:
+        stats = get_quote_stats(conn)
+    return stats
 
 
 # 健康检查
