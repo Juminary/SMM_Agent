@@ -94,7 +94,6 @@ def _append_trace(
 def node_build_material(state: AgentState) -> AgentState:
     """构造物料对象（唯一的前置准备节点）"""
     t0 = time.perf_counter()
-    print(f"[DEBUG] node_build_material 开始")
     qd = state["quote_data"]
     material = {
         "id": qd.get("material_id") or qd.get("id") or f"MAT-{datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -134,14 +133,11 @@ def node_llm_router(state: AgentState, registry: ToolRegistry) -> AgentState:
       - 或直接给出最终结论（无 tool_calls，结束 ReAct 循环）
     """
     t0 = time.perf_counter()
-    print(f"[DEBUG] node_llm_router 开始, qd={state.get('quote_data',{}).get('material_name','?')}")
     tools = [t.get_openai_function() for t in registry._tools.values()]
     messages = list(state.get("messages", []))
 
     system_prompt = _build_react_system_prompt(state)
-    print(f"[DEBUG] 即将调用 LLM...")
     response = _call_kimi_with_tools(system_prompt, messages, tools)
-    print(f"[DEBUG] LLM 调用返回, tool_calls={len(response.get('tool_calls',[]))}")
 
     messages.append(response)
     state["messages"] = messages
@@ -520,13 +516,11 @@ def _call_kimi_with_tools(
     messages: List[Dict[str, Any]],
     tools: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    print(f"[DEBUG] _call_kimi_with_tools 被调用, tools数量={len(tools)}")
     api_key = os.environ.get("KIMI_API_KEY", "")
     base_url = os.environ.get("KIMI_BASE_URL", "https://ai-gateway.ailab.jiuan.com/v1")
     model = os.environ.get("KIMI_MODEL", "kimi-k2.5")
 
     if not api_key:
-        print("[DEBUG] KIMI_API_KEY 未设置!")
         return {"role": "assistant", "content": "KIMI_API_KEY not set", "tool_calls": []}
 
     try:
@@ -539,7 +533,6 @@ def _call_kimi_with_tools(
 
         full_messages = [{"role": "system", "content": system_prompt}] + list(messages)
 
-        print(f"[DEBUG] 即将发送 OpenAI 请求...")
         response = client.chat.completions.create(
             model=model,
             messages=full_messages,
@@ -548,7 +541,6 @@ def _call_kimi_with_tools(
             temperature=0.3,
             max_tokens=2048,
         )
-        print(f"[DEBUG] OpenAI 请求返回!")
         msg = response.choices[0].message
         return {
             "role": "assistant",
