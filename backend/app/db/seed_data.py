@@ -195,6 +195,10 @@ def seed(seed_val: int = 42, reset: bool = False):
             n_ext = generate_external_references(conn)
             print(f"  ✓ 外部参考: {n_ext} 条")
 
+            # 5.5 库存
+            n_inv = generate_inventory(conn, materials_count=n_materials)
+            print(f"  ✓ 库存: {n_inv} 条")
+
             # 6. 刷新供应商画像
             refresh_supplier_profiles(conn)
             print(f"  ✓ 供应商画像已刷新")
@@ -442,6 +446,55 @@ def generate_external_references(conn) -> int:
         )
     conn.commit()
     return len(EXTERNAL_MARKET_DATA)
+
+
+def generate_inventory(conn, materials_count: int = 500) -> int:
+    """为部分物料生成模拟库存数据"""
+    today = datetime.now()
+    count = 0
+
+    # 取部分物料（~60%），模拟真实场景中不是所有物料都有库存记录
+    materials = list(conn.execute(
+        "SELECT id, name, category, supplier_name FROM materials LIMIT ?",
+        (int(materials_count * 0.6),)
+    ).fetchall())
+
+    for m in materials:
+        # 随机库存参数
+        daily_use = random.choice([5, 10, 20, 50, 100, 200, 500])
+        stock = random.randint(0, daily_use * random.choice([3, 7, 14, 30, 60]))
+        safety = int(daily_use * random.choice([3, 5, 7, 10]))
+        days = int(stock / daily_use) if daily_use > 0 else 0
+
+        # 紧急度判定
+        if days <= 3:
+            urgency = "紧急"
+        elif days <= 7:
+            urgency = "关注"
+        elif days <= 14:
+            urgency = "正常"
+        else:
+            urgency = "充裕"
+
+        last_restock = (today - timedelta(days=random.randint(5, 90))).strftime("%Y-%m-%d")
+
+        conn.execute(
+            """INSERT INTO inventory
+               (material_id, material_name, category, current_stock, safety_stock,
+                daily_consumption, days_remaining, urgency, last_restock_date,
+                supplier_name, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                m["id"], m["name"], m["category"],
+                stock, safety, daily_use, days, urgency, last_restock,
+                m["supplier_name"],
+                "模拟数据" if urgency == "紧急" else "",
+            ),
+        )
+        count += 1
+
+    conn.commit()
+    return count
 
 
 if __name__ == "__main__":

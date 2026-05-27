@@ -223,6 +223,25 @@ CREATE TABLE IF NOT EXISTS processing_rates (
     created_at      TEXT DEFAULT (datetime('now'))
 );
 
+-- ===== 物料库存表 =====
+CREATE TABLE IF NOT EXISTS inventory (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    material_id     TEXT NOT NULL,
+    material_name   TEXT DEFAULT '',
+    category        TEXT DEFAULT '',
+    current_stock   INTEGER DEFAULT 0,
+    safety_stock    INTEGER DEFAULT 0,
+    daily_consumption INTEGER DEFAULT 0,
+    days_remaining  INTEGER DEFAULT 0,
+    urgency         TEXT DEFAULT '正常',
+    last_restock_date TEXT DEFAULT '',
+    supplier_name   TEXT DEFAULT '',
+    note            TEXT DEFAULT '',
+    updated_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_inventory_material ON inventory(material_id);
+
 -- ===== LangGraph Checkpoint 表 =====
 CREATE TABLE IF NOT EXISTS checkpoints (
     thread_id       TEXT NOT NULL,

@@ -8,6 +8,7 @@ Agent核心技能模块
 
 import json
 import math
+import os
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
@@ -134,31 +135,45 @@ class SimilarityMatcher(Tool):
         self._load_embedding_model()
 
     def _load_embedding_model(self) -> None:
-        """加载 embedding 模型并预计算所有物料的向量"""
+        """加载 embedding 模型并预计算所有物料的向量
+
+        默认使用 scikit-learn TF-IDF char n-gram（无额外依赖，中文友好）。
+        sentence-transformers 可用时自动升级为语义向量（可选）。
+        """
+        texts = [self._material_to_text(m) for m in self.materials]
+        self._id_to_idx = {m.id: i for i, m in enumerate(self.materials)}
+
+        # 默认: scikit-learn TF-IDF
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.preprocessing import normalize
+
+        self._vectorizer = TfidfVectorizer(
+            analyzer='char_wb', ngram_range=(2, 4), max_features=512,
+        )
+        tfidf = self._vectorizer.fit_transform(texts)
+        self._embeddings = normalize(tfidf, norm='l2').toarray()
+        self._embed_model = 'tfidf'
+        self.model_loaded = True
+        print(f"[SimilarityMatcher] TF-IDF loaded: {self._embeddings.shape[1]}d")
+
+        # 可选: sentence-transformers 语义模型（需要兼容的 PyTorch 版本）
         try:
             from sentence_transformers import SentenceTransformer
-            # 中文优化模型，轻量（~24MB）
             for model_name in [
                 'BAAI/bge-small-zh-v1.5',
                 'paraphrase-multilingual-MiniLM-L12-v2',
-                'all-MiniLM-L6-v2',
             ]:
                 try:
                     self._embed_model = SentenceTransformer(model_name)
-                    break
+                    self._embeddings = self._embed_model.encode(
+                        texts, normalize_embeddings=True, show_progress_bar=False,
+                    )
+                    print(f"[SimilarityMatcher] Upgraded to ST: {self._embed_model.get_sentence_embedding_dimension()}d")
+                    return
                 except Exception:
                     continue
-
-            if self._embed_model:
-                texts = [self._material_to_text(m) for m in self.materials]
-                self._embeddings = self._embed_model.encode(
-                    texts, normalize_embeddings=True, show_progress_bar=False
-                )
-                self._id_to_idx = {m.id: i for i, m in enumerate(self.materials)}
-                self.model_loaded = True
-                print(f"[SimilarityMatcher] Embedding model loaded: {self._embed_model.get_sentence_embedding_dimension()}d")
-        except Exception as e:
-            print(f"[SimilarityMatcher] Embedding model unavailable: {e}, falling back to rule-based")
+        except Exception:
+            pass  # TF-IDF already loaded, no action needed
 
     def _material_to_text(self, mat) -> str:
         """将物料序列化为文本，用于 embedding"""
@@ -170,13 +185,19 @@ class SimilarityMatcher(Tool):
     # ===== Embedding 模式 =====
 
     def _find_similar_embedding(self, target: Material, top_k: int) -> List[Dict]:
-        """基于余弦相似度的向量检索"""
+        """基于余弦相似度的向量检索（支持 ST / TF-IDF）"""
         import numpy as np
+        from sklearn.preprocessing import normalize
 
         target_text = self._material_to_text(target)
-        target_vec = self._embed_model.encode(
-            [target_text], normalize_embeddings=True
-        )[0]
+
+        if self._embed_model == 'tfidf':
+            tfidf_vec = self._vectorizer.transform([target_text])
+            target_vec = normalize(tfidf_vec, norm='l2').toarray()[0]
+        else:
+            target_vec = self._embed_model.encode(
+                [target_text], normalize_embeddings=True,
+            )[0]
 
         # 余弦相似度（已 L2 归一化，点积即余弦）
         scores = np.dot(target_vec, self._embeddings.T)
@@ -280,13 +301,14 @@ class SimilarityMatcher(Tool):
 
 
 class PricePredictor(Tool):
-    """价格区间预测 Skill"""
+    """价格区间预测 Skill — 层次贝叶斯模型 + 分位数兜底"""
 
     name = "tool_predict_price_range"
     description = (
-        "根据物料的类别、工艺复杂度、订单量，"
-        "从历史采购数据中推算价格 P10/P50/P90 三分位区间。"
-        "当历史数据不足 20 条时，置信度降低。"
+        "根据物料的类别、供应商、订单量，用层次贝叶斯模型预测合理价格区间。"
+        "模型结构：log_price ~ category_intercept + supplier_random_effect + quantity_discount。"
+        "新供应商自动向品类均值收缩，小样本品类后验区间自然加宽。"
+        "贝叶斯模型不可用时降级为分位数统计。"
     )
     input_schema = {
         "type": "object",
@@ -301,54 +323,247 @@ class PricePredictor(Tool):
 
     def __init__(self, materials_data: List[Dict]):
         self.materials = materials_data
-        self._build_model()
 
-    def _build_model(self):
-        self.category_stats = {}
+        # 始终建分位数模型作为兜底
+        self._build_quantile_fallback()
+
+        # 尝试加载/拟合层次贝叶斯模型
+        try:
+            if self._load_cache():
+                self._model_type = "bayesian"
+                self.model_loaded = True
+            else:
+                self._fit_bayesian_model()
+                self._save_cache()
+                self._model_type = "bayesian"
+                self.model_loaded = True
+        except Exception as e:
+            print(f"[PricePredictor] Bayesian model failed: {e}, using quantile fallback")
+            self._model_type = "quantile"
+
+    # ===== 磁盘缓存 =====
+
+    @staticmethod
+    def _cache_path() -> str:
+        import os
+        data_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "data",
+        )
+        return os.path.join(data_dir, "bayesian_model_cache.npz")
+
+    def _data_fingerprint(self) -> str:
+        """用物料数量和价格哈希判断数据是否变化"""
+        import hashlib
+        prices = sorted(str(m['unit_price']) for m in self.materials)
+        return hashlib.md5(f"{len(self.materials)}:{','.join(prices)}".encode()).hexdigest()
+
+    def _save_cache(self) -> None:
+        import numpy as np
+        params = self._bayes_params
+        np.savez(
+            self._cache_path(),
+            alpha_cat=params['alpha_cat'],
+            beta_supp=params['beta_supp'],
+            gamma=np.array(params['gamma']),
+            sigma=np.array(params['sigma']),
+            sigma_cat=np.array(params['sigma_cat']),
+            sigma_supp=np.array(params['sigma_supp']),
+            mu_global=np.array(params['mu_global']),
+            log_qty_mean=np.array(params['log_qty_mean']),
+            n_obs=np.array(params['n_obs']),
+            cat_labels=np.array(self._cat_labels),
+            supp_labels=np.array(self._supp_labels),
+            fingerprint=np.array(self._data_fingerprint()),
+        )
+        print(f"[PricePredictor] Cache saved to {self._cache_path()}")
+
+    def _load_cache(self) -> bool:
+        import numpy as np
+        import os
+        path = self._cache_path()
+        if not os.path.exists(path):
+            print(f"[PricePredictor] No cache found, training needed")
+            return False
+
+        try:
+            data = np.load(path, allow_pickle=True)
+            if str(data['fingerprint']) != self._data_fingerprint():
+                print(f"[PricePredictor] Data changed, retraining needed")
+                return False
+
+            self._bayes_params = {
+                'alpha_cat': data['alpha_cat'],
+                'beta_supp': data['beta_supp'],
+                'gamma': float(data['gamma']),
+                'sigma': float(data['sigma']),
+                'sigma_cat': float(data['sigma_cat']),
+                'sigma_supp': float(data['sigma_supp']),
+                'mu_global': float(data['mu_global']),
+                'log_qty_mean': float(data['log_qty_mean']),
+                'n_obs': int(data['n_obs']),
+            }
+            self._cat_labels = list(data['cat_labels'])
+            self._supp_labels = list(data['supp_labels'])
+            self._cat_to_idx = {c: i for i, c in enumerate(self._cat_labels)}
+            self._supp_to_idx = {s: i for i, s in enumerate(self._supp_labels)}
+            print(f"[PricePredictor] Cache loaded: {self._bayes_params['n_obs']} obs, "
+                  f"{len(self._cat_labels)} categories, {len(self._supp_labels)} suppliers")
+            return True
+        except Exception as e:
+            print(f"[PricePredictor] Cache load failed: {e}, retraining needed")
+            return False
+
+    # ===== 层次贝叶斯模型 =====
+
+    def _fit_bayesian_model(self) -> None:
+        import numpy as np
+        import pymc as pm
+
+        # 编码分类变量
+        cats = sorted(set(m['category'] for m in self.materials))
+        supps = sorted(set(m.get('supplier_name', '') for m in self.materials))
+        self._cat_to_idx = {c: i for i, c in enumerate(cats)}
+        self._supp_to_idx = {s: i for i, s in enumerate(supps)}
+        self._cat_labels = cats
+        self._supp_labels = supps
+
+        n = len(self.materials)
+        cat_idx = np.array([self._cat_to_idx[m['category']] for m in self.materials])
+        supp_idx = np.array([self._supp_to_idx.get(m.get('supplier_name', ''), 0) for m in self.materials])
+        log_qty = np.array([np.log(max(m.get('order_quantity', 10000), 1)) for m in self.materials])
+        log_qty_mean = log_qty.mean()
+        log_qty_c = log_qty - log_qty_mean
+        log_price = np.array([np.log(max(m['unit_price'], 0.01)) for m in self.materials])
+
+        n_cats = len(cats)
+        n_supps = len(supps)
+
+        with pm.Model() as model:
+            # 全局均值
+            mu_global = pm.Normal('mu_global', mu=np.log(np.median([m['unit_price'] for m in self.materials])), sigma=2)
+
+            # 品类级随机截距（向全局均值收缩）
+            sigma_cat = pm.HalfNormal('sigma_cat', sigma=1)
+            alpha_cat_offset = pm.Normal('alpha_cat_offset', mu=0, sigma=1, shape=n_cats)
+            alpha_cat = pm.Deterministic('alpha_cat', mu_global + alpha_cat_offset * sigma_cat)
+
+            # 供应商随机效应（向 0 收缩）
+            sigma_supp = pm.HalfNormal('sigma_supp', sigma=0.5)
+            beta_supp = pm.Normal('beta_supp', mu=0, sigma=sigma_supp, shape=n_supps)
+
+            # 数量折扣弹性（对数-对数，预期 -0.03 ~ -0.08）
+            gamma = pm.Normal('gamma', mu=-0.05, sigma=0.1)
+
+            # 残差
+            sigma = pm.HalfNormal('sigma', sigma=0.5)
+
+            # 线性预测
+            mu = alpha_cat[cat_idx] + beta_supp[supp_idx] + gamma * log_qty_c
+
+            # 似然
+            pm.Normal('obs', mu=mu, sigma=sigma, observed=log_price)
+
+            # MCMC 采样
+            trace = pm.sample(
+                draws=1000, tune=1000, chains=2,
+                target_accept=0.9, progressbar=False,
+            )
+
+        # 缓存后验均值
+        self._bayes_params = {
+            'alpha_cat': trace.posterior['alpha_cat'].mean(dim=('chain', 'draw')).values,
+            'beta_supp': trace.posterior['beta_supp'].mean(dim=('chain', 'draw')).values,
+            'gamma': float(trace.posterior['gamma'].mean()),
+            'sigma': float(trace.posterior['sigma'].mean()),
+            'sigma_cat': float(trace.posterior['sigma_cat'].mean()),
+            'sigma_supp': float(trace.posterior['sigma_supp'].mean()),
+            'mu_global': float(trace.posterior['mu_global'].mean()),
+            'log_qty_mean': float(log_qty_mean),
+            'n_obs': n,
+        }
+        print(f"[PricePredictor] Bayesian model fitted: {n} obs, {n_cats} categories, {n_supps} suppliers")
+
+    def _predict_bayesian(self, material: Dict) -> Dict[str, float]:
+        """用后验参数做点推断（毫秒级）"""
+        import numpy as np
+        params = self._bayes_params
+
+        cat = material.get('category', '')
+        supp = material.get('supplier_name', '')
+        qty = material.get('quantity', material.get('order_quantity', 10000))
+
+        # 品类截距（未知品类 → 全局均值）
+        cat_idx = self._cat_to_idx.get(cat)
+        alpha = float(params['alpha_cat'][cat_idx]) if cat_idx is not None else params['mu_global']
+
+        # 供应商效应（未知供应商 → 0，即完全收缩到品类均值）
+        supp_idx = self._supp_to_idx.get(supp)
+        beta = float(params['beta_supp'][supp_idx]) if supp_idx is not None else 0.0
+
+        # 数量效应
+        gamma = params['gamma']
+        qty_effect = gamma * (np.log(max(qty, 1)) - params['log_qty_mean'])
+
+        # 预测 log_price
+        mu_log = alpha + beta + qty_effect
+
+        # 不确定性：已知供应商低，新供应商高
+        pred_sd = params['sigma'] if supp_idx is not None else \
+            float(np.sqrt(params['sigma']**2 + params['sigma_supp']**2))
+
+        p50 = round(float(np.exp(mu_log)), 2)
+        p10 = round(float(np.exp(mu_log - 1.28 * pred_sd)), 2)
+        p90 = round(float(np.exp(mu_log + 1.28 * pred_sd)), 2)
+
+        # 置信度：品类数据量越多置信度越高
+        n_cat = sum(1 for m in self.materials if m['category'] == cat)
+        confidence = round(0.70 + 0.15 * min(n_cat / 30, 1.0), 2)
+
+        return {
+            'p10': max(p10, 0.01), 'p50': p50, 'p90': p90,
+            'confidence': confidence,
+            'model': 'bayesian',
+        }
+
+    # ===== 分位数兜底 =====
+
+    def _build_quantile_fallback(self):
+        self._cat_prices: Dict[str, List[float]] = {}
         for mat in self.materials:
             cat = mat['category']
-            if cat not in self.category_stats:
-                self.category_stats[cat] = []
-            self.category_stats[cat].append(mat['unit_price'])
+            if cat not in self._cat_prices:
+                self._cat_prices[cat] = []
+            self._cat_prices[cat].append(mat['unit_price'])
+
+    def _predict_quantile(self, material: Dict) -> Dict[str, float]:
+        cat = material.get('category', '其他')
+        prices = self._cat_prices.get(cat, [])
+        if not prices:
+            return {'p10': 0, 'p50': 0, 'p90': 0, 'confidence': 0.50, 'model': 'quantile'}
+
+        prices_sorted = sorted(prices)
+        n = len(prices_sorted)
+        p10 = prices_sorted[max(0, int(n * 0.1))]
+        p50 = prices_sorted[max(0, int(n * 0.5))]
+        p90 = prices_sorted[min(n - 1, int(n * 0.9))]
+
+        qty = material.get('quantity', 10000)
+        qty_factor = 1 + (10000 - qty) / 100000
+
+        return {
+            'p10': round(p10 * qty_factor, 2),
+            'p50': round(p50 * qty_factor, 2),
+            'p90': round(p90 * qty_factor, 2),
+            'confidence': round(0.65 + 0.1 * min(n / 20, 1.0), 2),
+            'model': 'quantile',
+        }
 
     def predict(self, material: Dict) -> Dict[str, float]:
-        """内部预测方法"""
-        cat = material.get('category', '其他')
+        if self._model_type == "bayesian":
+            return self._predict_bayesian(material)
+        return self._predict_quantile(material)
 
-        if cat in self.category_stats:
-            prices = sorted(self.category_stats[cat])
-            n = len(prices)
-            p10_idx = max(0, int(n * 0.1))
-            p50_idx = max(0, int(n * 0.5))
-            p90_idx = min(n - 1, int(n * 0.9))
-            base_p10 = prices[p10_idx]
-            base_p50 = prices[p50_idx]
-            base_p90 = prices[p90_idx]
-
-            processing = material.get('processing', '')
-            complexity_factor = 1.0
-            if '沉金' in processing:
-                complexity_factor = 1.15
-            elif '缝制' in processing:
-                complexity_factor = 1.05
-
-            quantity = material.get('quantity', 10000)
-            quantity_factor = 1 + (10000 - quantity) / 100000
-
-            return {
-                'p10': round(base_p10 * complexity_factor * quantity_factor, 2),
-                'p50': round(base_p50 * complexity_factor * quantity_factor, 2),
-                'p90': round(base_p90 * complexity_factor * quantity_factor, 2),
-                'confidence': round(0.75 + 0.1 * min(n / 20, 1), 2)
-            }
-        else:
-            quote = material.get('supplier_quote', 5.0)
-            return {
-                'p10': round(quote * 0.7, 2),
-                'p50': round(quote * 0.85, 2),
-                'p90': round(quote * 1.0, 2),
-                'confidence': 0.60
-            }
+    # ===== Tool 接口 =====
 
     def execute(self, material_id: str, quantity: int = 10000,
                 category: str = None, processing: str = None,
@@ -356,49 +571,40 @@ class PricePredictor(Tool):
         """Tool 接口：预测价格区间"""
         matched = next((m for m in self.materials if m['id'] == material_id), None)
 
-        # Fallback: 如果 material_id 找不到，尝试用 category + processing + unit_price 构造
         if matched is None:
             if category:
-                cat_prices = self.category_stats.get(category, [])
-                n = len(cat_prices)
-                if n > 0:
-                    prices = sorted(cat_prices)
-                    p10 = round(prices[max(0, int(n * 0.1))], 2)
-                    p50 = round(prices[max(0, int(n * 0.5))], 2)
-                    p90 = round(prices[min(n - 1, int(n * 0.9))], 2)
-                    factor = 1.05 if (processing and '沉金' in processing) else 1.0
-                    qty_factor = 1 + (10000 - quantity) / 100000
-                    return {
-                        "result": {
-                            'p10': round(p10 * factor * qty_factor, 2),
-                            'p50': round(p50 * factor * qty_factor, 2),
-                            'p90': round(p90 * factor * qty_factor, 2),
-                            'confidence': round(0.70 + 0.05 * min(n / 20, 1), 2),
-                        },
-                        "confidence": round(0.70 + 0.05 * min(n / 20, 1), 3),
-                        "reasoning": (
-                            f"[Fallback] 类别 {category} 有 {n} 条历史记录，"
-                            f"预测区间 [P10=¥{round(p10 * factor * qty_factor, 2)}, "
-                            f"P50=¥{round(p50 * factor * qty_factor, 2)}, "
-                            f"P90=¥{round(p90 * factor * qty_factor, 2)}]，"
-                            f"工艺={processing or '未知'}，数量={quantity}"
-                        ),
-                    }
+                mat = {
+                    'category': category, 'supplier_name': kwargs.get('supplier_name', ''),
+                    'quantity': quantity, 'order_quantity': quantity,
+                }
+                result = self.predict(mat)
+                n_cat = len(self._cat_prices.get(category, []))
+                return {
+                    "result": result,
+                    "confidence": round(result.get('confidence', 0.6), 3),
+                    "reasoning": (
+                        f"[{self._model_type}] 类别 {category} 有 {n_cat} 条记录，"
+                        f"预测区间 [P10=¥{result['p10']}, P50=¥{result['p50']}, P90=¥{result['p90']}]"
+                    ),
+                }
             return {
                 "result": {},
                 "confidence": 0.0,
                 "reasoning": f"物料ID {material_id} 在历史库中未找到，且无 category 可用",
             }
 
-        mat = {**matched, "quantity": quantity}
+        mat = {
+            **matched, 'quantity': quantity, 'order_quantity': quantity,
+            'supplier_name': matched.get('supplier_name', ''),
+        }
         result = self.predict(mat)
+        n_cat = len(self._cat_prices.get(matched['category'], []))
 
-        n = len(self.category_stats.get(matched['category'], []))
         return {
             "result": result,
             "confidence": round(result.get('confidence', 0.6), 3),
             "reasoning": (
-                f"类别 {matched['category']} 有 {n} 条历史记录，"
+                f"[{self._model_type}] 类别 {matched['category']} 有 {n_cat} 条记录，"
                 f"预测区间 [P10=¥{result['p10']}, P50=¥{result['p50']}, P90=¥{result['p90']}]，"
                 f"工艺={matched.get('processing', '未知')}，数量={quantity}"
             ),
@@ -406,13 +612,14 @@ class PricePredictor(Tool):
 
 
 class CostAnalyzer(Tool):
-    """成本结构拆解 Skill"""
+    """成本结构拆解 Skill — 贝叶斯合理价锚定 + 原材料市场交叉验证"""
 
     name = "tool_analyze_cost_structure"
     description = (
-        "将供应商报价拆解为 原材料/加工费/表面处理/包装物流/管理利润 五个成本项，"
-        "与行业基准对比，识别各成本项的偏离程度。"
-        "偏离 >50% 为严重异常，>25% 为偏高/偏低，>10% 为略高/略低。"
+        "将供应商报价拆解为 原材料/加工费/表面处理/包装物流/管理利润 五个成本项。"
+        "以贝叶斯模型预测的合理价（P50）为锚点计算各项基准金额，"
+        "再与供应商报价隐含金额对比。"
+        "原材料项可与外部市场参考价交叉验证，其他项标注为参考值。"
     )
     input_schema = {
         "type": "object",
@@ -425,20 +632,41 @@ class CostAnalyzer(Tool):
     confidence = 0.80
     model_loaded = False
 
-    def __init__(self, benchmarks: Dict):
+    def __init__(self, benchmarks: Dict, external_refs: List[Dict] = None):
         self.benchmarks = benchmarks
+        # 外部市场参考缓存在内存，但每次 execute 会从 DB 重读以获取最新数据
+        self._market_refs: Dict[str, Dict] = {}
+        if external_refs:
+            for ref in external_refs:
+                self._market_refs[ref.get('material_category', '')] = ref
 
-    def analyze(self, material: Dict, quote: float) -> Dict:
+    def _refresh_market_refs(self) -> None:
+        """从数据库重新加载市场参考数据（获取最新的联网刷新结果）"""
+        try:
+            from app.db.database import get_connection
+            conn = get_connection()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM external_references"
+                ).fetchall()
+                for row in rows:
+                    d = dict(row)
+                    self._market_refs[d['material_category']] = d
+            finally:
+                conn.close()
+        except Exception:
+            pass  # DB 不可用时保持内存缓存
+
+    def analyze(self, material: Dict, quote: float, prediction_p50: float = None) -> Dict:
         """
         成本结构参照分析。
 
-        由于供应商通常只提供总价而非逐项明细，无法直接计算各成本项的
-        真实偏离度。这里做的是：
-          1. 查询该品类的行业成本结构基准（原材料/加工/表面/包装/利润占比）
-          2. 按总报价反推各项的"基准推算金额"
-          3. 标注所有项为"参考值"，诚实告知需要供应商提供明细才能做逐项对比
+        以贝叶斯合理价 P50 为锚点：
+          - 合理价 × 基准% = 合理各项金额（anchor）
+          - 供应商报价 × 基准% = 隐含各项金额（what supplier is asking）
+          - 偏离 = (隐含 - 合理) / 合理 × 100%
 
-        唯一能做真实对比的是：用外部市场参考价校验总价是否在合理区间。
+        原材料可独立交叉验证市场行情，其他项标注为参考值。
         """
         category = material.get('category', '其他')
         benchmark_key = self._get_benchmark_key(category)
@@ -451,7 +679,14 @@ class CostAnalyzer(Tool):
         })
         adjusted = self._adjust_benchmark(benchmark, material)
 
+        # 锚点价格：优先用贝叶斯 P50，否则用供应商报价
+        anchor = prediction_p50 if prediction_p50 else quote
+        has_anchor = prediction_p50 is not None
+
         cost_items = []
+        anomaly_count = 0
+        total_deviation = 0.0
+
         for item_name, pct_key in [
             ('原材料', 'raw_material_pct'),
             ('加工费', 'processing_pct'),
@@ -460,23 +695,107 @@ class CostAnalyzer(Tool):
             ('管理+利润', 'management_profit_pct')
         ]:
             benchmark_pct = adjusted.get(pct_key, 0)
-            benchmark_amount = round(quote * benchmark_pct / 100, 2)
+            reasonable_amount = round(anchor * benchmark_pct / 100, 2)
+            implied_amount = round(quote * benchmark_pct / 100, 2)
+            deviation = round((implied_amount - reasonable_amount) / reasonable_amount * 100, 1) if reasonable_amount > 0 else 0
+
+            # 只有原材料能交叉验证市场数据
+            if item_name == '原材料' and has_anchor:
+                market_check = self._check_against_market(category, implied_amount, reasonable_amount)
+                status = market_check['status']
+                data_source = market_check['source']
+                if market_check['is_anomalous']:
+                    anomaly_count += 1
+                    total_deviation += abs(deviation)
+            elif has_anchor:
+                # 其他项：有锚点可算偏离，但无法独立验证
+                if deviation > 30:
+                    status = "可能偏高"
+                    anomaly_count += 1
+                    total_deviation += deviation
+                elif deviation < -30:
+                    status = "可能偏低"
+                else:
+                    status = "参考值"
+                data_source = f"行业基准（锚点=¥{anchor:.2f}）"
+            else:
+                status = "参考值"
+                data_source = "行业基准（无锚点）"
 
             cost_items.append({
                 'item': item_name,
                 'benchmark_pct': benchmark_pct,
-                'benchmark_amount': benchmark_amount,
-                'supplier_pct': None,          # 供应商未提供明细，无法计算
-                'deviation': None,             # 无法计算逐项偏离
-                'status': '参考值',
-                'data_source': '行业基准',
+                'reasonable_amount': reasonable_amount,   # 合理价下的金额
+                'implied_amount': implied_amount,         # 供应商报价隐含金额
+                'deviation_from_reasonable': deviation,
+                'status': status,
+                'data_source': data_source,
+                'independently_verified': item_name == '原材料' and has_anchor,
             })
+
+        data_quality = "with_anchor" if has_anchor else "reference_only"
+        cost_deviation_score = round(min(100, total_deviation / max(anomaly_count, 1)), 1) if anomaly_count > 0 else 0
 
         return {
             'cost_items': cost_items,
             'benchmark_key': benchmark_key,
-            'data_quality': 'reference_only',
-            'note': '供应商未提供成本明细，以下占比为行业平均参考。各成本项的"基准推算金额"系按总报价×行业占比反推，非供应商实际成本构成。如需逐项偏离分析，请要求供应商提供成本明细。',
+            'data_quality': data_quality,
+            'anchor_price': anchor,
+            'anchor_source': '贝叶斯P50' if has_anchor else '供应商报价（无合理价预测）',
+            'cost_deviation_score': cost_deviation_score if has_anchor else None,
+            'anomaly_count': anomaly_count,
+            'note': (
+                f"以{'贝叶斯合理价 ¥' + str(anchor) if has_anchor else '供应商报价'}为锚点计算各项基准。"
+                "原材料可独立交叉验证市场数据，其余项为行业基准参照。"
+            ),
+        }
+
+    def _check_against_market(self, category: str, implied_amount: float,
+                               reasonable_amount: float) -> Dict:
+        """原材料成本交叉验证市场行情 + 合理价偏离"""
+        ref = self._market_refs.get(category)
+        if not ref:
+            return {'status': '参考值（无市场数据）', 'source': '行业基准', 'is_anomalous': False}
+
+        low, high = ref.get('price_low', 0), ref.get('price_high', 0)
+        source = ref.get('source', '未知')
+
+        if high <= 0:
+            return {'status': '参考值（市场数据无效）', 'source': source, 'is_anomalous': False}
+
+        # 判断合理价锚点是否在市场范围内
+        anchor_ok = low <= reasonable_amount <= high
+
+        # 供应商隐含金额 vs 市场区间
+        if implied_amount > high * 1.3:
+            status = '明显偏高'
+            is_anomalous = True
+        elif implied_amount > high:
+            status = '略高于市场'
+            is_anomalous = True
+        elif implied_amount < low * 0.7:
+            status = '明显偏低'
+            is_anomalous = True
+        elif implied_amount < low:
+            status = '略低于市场'
+            is_anomalous = False
+        else:
+            status = '在市场范围内'
+            is_anomalous = False
+
+        # 补充偏离合理价的提示
+        deviation_from_anchor = (implied_amount - reasonable_amount) / reasonable_amount * 100 if reasonable_amount > 0 else 0
+        if deviation_from_anchor > 50 and not is_anomalous:
+            status += f'，但偏离合理锚点 {deviation_from_anchor:.0f}%（总价偏高驱动，非原材料独立异常）'
+
+        return {
+            'status': status,
+            'source': f'{source}（市场 ¥{low:.1f}~¥{high:.1f}）',
+            'is_anomalous': is_anomalous,
+            'detail': (
+                f"供应商隐含原材料 ¥{implied_amount:.1f} vs 市场 ¥{low:.1f}~¥{high:.1f}"
+                f"（{'✓' if anchor_ok else '✗'}合理锚点 ¥{reasonable_amount:.1f}{'在市场内' if anchor_ok else '不在市场内'}）"
+            ),
         }
 
     def _get_benchmark_key(self, category: str) -> str:
@@ -501,22 +820,277 @@ class CostAnalyzer(Tool):
 
     def execute(self, material_id: str, supplier_quote: float,
                 category: str = None, processing: str = None, **kwargs) -> Dict[str, Any]:
-        """Tool 接口：成本结构参照分析"""
+        """Tool 接口：成本结构参照分析（支持贝叶斯锚点 + 自动刷新行情）"""
         mat_category = category or "塑料外壳"
         mat = {"id": material_id, "category": mat_category, "processing": processing or ""}
-        result = self.analyze(mat, supplier_quote)
 
-        # 所有项均为参考值，数据质量标注
-        data_quality = result.get("data_quality", "reference_only")
+        # 从 DB 刷新市场参考数据（获取 Phase 1.5 联网更新的最新行情）
+        self._refresh_market_refs()
+
+        # 从 kwargs 取贝叶斯 P50 作为锚点
+        prediction_p50 = kwargs.get('prediction_p50')
+
+        result = self.analyze(mat, supplier_quote, prediction_p50=prediction_p50)
+
+        anomaly_count = result.get('anomaly_count', 0)
+        data_quality = result.get('data_quality', 'reference_only')
 
         return {
             "result": result,
-            "confidence": round(self.confidence * 0.7, 3),  # 仅为行业参照，置信度降权
+            "confidence": round(
+                self.confidence * (0.85 if data_quality == 'with_anchor' else 0.60)
+                * (0.9 ** anomaly_count), 3
+            ),
             "reasoning": (
-                f"基准类型={result['benchmark_key']}，数据质量={data_quality}。"
+                f"基准={result['benchmark_key']}，锚点={result['anchor_source']}，"
+                f"异常项={anomaly_count}，原材料交叉验证={'已完成' if result['cost_items'][0].get('independently_verified') else '未完成'}。"
                 f"{result.get('note', '')}"
             ),
         }
+
+
+class MarketPriceLookup(Tool):
+    """实时市场行情查询 — LLM 驱动 + DB 缓存"""
+
+    name = "tool_search_market_price"
+    description = (
+        "搜索原材料和品类的当前市场价格行情。"
+        "输入物料品类和材质，返回市场价格区间、近期趋势、信息来源。"
+        "用于验证供应商报价是否受市场行情驱动，或判断原材料成本是否合理。"
+        "当怀疑原材料行情波动导致报价偏高时调用此工具。"
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "material_category": {"type": "string", "description": "物料品类（如 塑料外壳、PCB板）"},
+            "material_type": {"type": "string", "description": "材质类型（如 ABS、FR-4），可选"},
+        },
+        "required": ["material_category"],
+    }
+    confidence = 0.72
+    model_loaded = False
+
+    def __init__(self):
+        self._api_key = os.environ.get("KIMI_API_KEY", "")
+        self._base_url = os.environ.get("KIMI_BASE_URL", "https://ai-gateway.ailab.jiuan.com/v1")
+        self._model = os.environ.get("KIMI_MODEL", "kimi-k2.5")
+
+    def execute(self, material_category: str, material_type: str = None,
+                **kwargs) -> Dict[str, Any]:
+        """查询市场行情（LLM 知识 + DB 缓存）"""
+        import json as _json
+
+        # 先查 DB 缓存
+        db_result = self._check_db_cache(material_category, material_type)
+        if db_result and db_result.get('fresh'):
+            return db_result
+
+        # 调用 LLM 获取市场行情
+        if self._api_key:
+            llm_result = self._query_llm(material_category, material_type)
+            # 写入 DB 缓存
+            if llm_result.get('available'):
+                self._save_to_db(material_category, material_type, llm_result)
+            return llm_result
+
+        # LLM 不可用时返回 DB 数据（即使不新鲜也比没有好）
+        if db_result:
+            db_result['result']['freshness'] = 'stale'
+            return db_result
+
+        return {
+            "result": {"available": False, "message": "无法查询市场行情（LLM 不可用且无缓存）"},
+            "confidence": 0.2,
+            "reasoning": "无法获取市场行情数据",
+        }
+
+    def _query_llm(self, category: str, material_type: str = None) -> Dict[str, Any]:
+        """DuckDuckGo 搜索 + Kimi 提取结构化行情数据"""
+        import json as _json
+        import httpx
+        from openai import OpenAI
+
+        type_hint = f" {material_type}" if material_type else ""
+        search_query = f"{category}{type_hint} 采购价格 行情 2025"
+
+        # Step 1: 联网搜索
+        search_snippets = self._web_search(search_query)
+
+        # Step 2: Kimi 从搜索结果中提取结构化数据
+        if search_snippets:
+            context = "\n".join(f"- {s}" for s in search_snippets[:8])
+            prompt = f"""根据以下搜索结果，提取{category}{type_hint}的当前市场行情。注意区分原材料价格（元/吨、元/kg）和成品价格（元/件），优先提取成品采购价。返回 JSON：
+
+搜索结果：
+{context}
+
+返回格式：
+{{"price_low": 价格下限数字, "price_high": 价格上限数字, "unit": "元/件",
+  "trend": "上涨/稳定/下跌", "trend_detail": "趋势说明",
+  "source": "数据来源", "confidence": 0.0-1.0, "note": "价格说明"}}
+
+价格提取规则（按优先级）：
+1. 成品采购价（元/件）最优
+2. 如只有原材料价（元/kg、元/吨），在note注明原料价，price_low/high填原料价，unit填对应单位
+3. 如只有趋势无具体价格，price_low/high填0，confidence=0.3
+4. 完全无有效信息时 confidence=0.2
+价格必须为数字，不能为null。
+只返回 JSON。"""
+        else:
+            # 无搜索结果，用 LLM 知识兜底
+            prompt = f"""请查询{category}{type_hint}的当前市场行情。返回 JSON（不要其他内容）：
+
+{{"price_low": 最低市场价（元/件）, "price_high": 最高市场价（元/件）, "unit": "计价单位",
+  "trend": "上涨/稳定/下跌", "trend_detail": "趋势说明", "source": "LLM知识库",
+  "confidence": 0.0-1.0, "note": "无联网数据，基于训练知识估计"}}
+
+只返回 JSON。"""
+
+        try:
+            client = OpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=httpx.Timeout(20.0, connect=5.0),
+            )
+            response = client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=400,
+            )
+            content = response.choices[0].message.content or ""
+            content = content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
+            data = _json.loads(content)
+
+            return {
+                "result": {
+                    "available": True,
+                    "category": category,
+                    "material_type": material_type or "全部",
+                    "price_low": data.get("price_low", 0),
+                    "price_high": data.get("price_high", 0),
+                    "unit": data.get("unit", "元/件"),
+                    "trend": data.get("trend", "未知"),
+                    "trend_detail": data.get("trend_detail", ""),
+                    "source": data.get("source", "LLM知识库"),
+                    "confidence": data.get("confidence", 0.7),
+                    "note": data.get("note", ""),
+                    "query_time": datetime.now().isoformat(),
+                    "searched": bool(search_snippets),
+                },
+                "confidence": round(data.get("confidence", 0.7), 3),
+                "reasoning": (
+                    f"{category} 市场行情：¥{data.get('price_low', '?')}~¥{data.get('price_high', '?')}"
+                    f"（{data.get('trend', '未知')}），来源：{data.get('source', 'LLM')}"
+                ),
+            }
+        except Exception as e:
+            print(f"[MarketPriceLookup] LLM query failed: {e}")
+            return {
+                "result": {"available": False, "message": f"查询失败: {e}"},
+                "confidence": 0.0,
+                "reasoning": f"市场行情查询失败: {e}",
+            }
+
+    def _web_search(self, query: str, max_results: int = 8) -> List[str]:
+        """DuckDuckGo 搜索，返回文本摘要列表"""
+        try:
+            from ddgs import DDGS
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+                snippets = []
+                for r in results:
+                    title = (r.get('title') or '')[:100]
+                    body = (r.get('body') or '')[:200]
+                    if body:
+                        snippets.append(f"{title}: {body}")
+                return snippets
+        except Exception as e:
+            print(f"[MarketPriceLookup] Web search failed: {e}")
+            return []
+
+    def _check_db_cache(self, category: str, material_type: str = None) -> Optional[Dict[str, Any]]:
+        """检查数据库缓存（24 小时内有效）"""
+        try:
+            from app.db.database import get_connection
+            conn = get_connection()
+            try:
+                row = conn.execute(
+                    """SELECT * FROM external_references
+                       WHERE material_category = ?
+                       ORDER BY updated_at DESC LIMIT 1""",
+                    (category,),
+                ).fetchone()
+                if not row:
+                    return None
+
+                d = dict(row)
+                updated = d.get('updated_at', '')
+                fresh = False
+                if updated:
+                    try:
+                        age = (datetime.now() - datetime.fromisoformat(updated)).total_seconds()
+                        fresh = age < 86400  # 24 小时
+                    except (ValueError, TypeError):
+                        pass
+
+                return {
+                    "result": {
+                        "available": True,
+                        "category": category,
+                        "material_type": material_type or "全部",
+                        "price_low": d['price_low'],
+                        "price_high": d['price_high'],
+                        "source": d.get('source', 'DB缓存'),
+                        "trend": "未知（缓存数据）",
+                        "freshness": "fresh" if fresh else "stale",
+                        "query_time": updated,
+                    },
+                    "confidence": 0.65 if fresh else 0.45,
+                    "reasoning": (
+                        f"{category} 行情（{'24h内缓存' if fresh else '历史缓存'}）："
+                        f"¥{d['price_low']}~¥{d['price_high']}，来源：{d.get('source', '')}"
+                    ),
+                }
+            finally:
+                conn.close()
+        except Exception:
+            return None
+
+    def _save_to_db(self, category: str, material_type: str,
+                    result: Dict[str, Any]) -> None:
+        """将查询结果写入数据库缓存（仅当有有效价格时）"""
+        data = result.get('result', {})
+        price_low = data.get('price_low')
+        price_high = data.get('price_high')
+
+        # 无有效价格不覆盖旧数据
+        if price_low is None or price_high is None:
+            return
+
+        try:
+            from app.db.database import get_connection
+            conn = get_connection()
+            try:
+                conn.execute(
+                    """INSERT OR REPLACE INTO external_references
+                       (material_category, price_low, price_high, source, sample_count, updated_at)
+                       VALUES (?, ?, ?, ?, ?, datetime('now'))""",
+                    (
+                        category,
+                        price_low,
+                        price_high,
+                        f"{data.get('source', 'LLM')} | {data.get('trend_detail', '')}",
+                        data.get('confidence', 70),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"[MarketPriceLookup] DB save failed: {e}")
 
 
 class ExternalRAGRetriever:
@@ -645,7 +1219,22 @@ class AnomalyScorer(Tool):
 
     def __init__(self, external_refs: List[Dict]):
         self.external_refs = {ref['material_category']: ref for ref in external_refs}
-        self._rag = ExternalRAGRetriever(external_refs)
+        self._rag = ExternalRAGRetriever(list(self.external_refs.values()))
+
+    def _refresh_external_refs(self) -> None:
+        """从数据库重载外部参考数据（获取 Phase 1.5 联网刷新后的最新行情）"""
+        try:
+            from app.db.database import get_connection
+            conn = get_connection()
+            try:
+                rows = conn.execute("SELECT * FROM external_references").fetchall()
+                refs = [dict(row) for row in rows]
+                self.external_refs = {ref['material_category']: ref for ref in refs}
+                self._rag = ExternalRAGRetriever(refs)
+            finally:
+                conn.close()
+        except Exception:
+            pass
 
     def calculate_deviation(self, quote: float, prediction: Dict,
                           cost_analysis: Dict, material: Dict) -> Dict:
@@ -742,7 +1331,10 @@ class AnomalyScorer(Tool):
         cost_analysis: Dict = None,
         **kwargs
     ) -> Dict[str, Any]:
-        """Tool 接口：计算偏离度"""
+        """Tool 接口：计算偏离度（自动刷新外部数据）"""
+        # 从 DB 重载最新行情数据（Phase 1.5 联网刷新的结果）
+        self._refresh_external_refs()
+
         if not prediction or not cost_analysis:
             return {
                 "result": {},
@@ -925,13 +1517,13 @@ class SolutionGenerator(Tool):
 # =============================================================================
 
 class SupplierProfiler(Tool):
-    """供应商画像查询 — 历史偏离趋势、合作年限、报价稳定性"""
+    """供应商画像查询 — materials 采购历史 + quotes 分析记录"""
 
     name = "tool_get_supplier_profile"
     description = (
-        "查询指定供应商的历史报价记录和偏离趋势。"
-        "返回：历史报价次数、平均偏离百分比、偏离趋势（上升/下降/稳定）、"
-        "合作时间跨度、各品类报价分布。"
+        "查询指定供应商的完整画像：采购历史 + 偏离分析记录。"
+        "返回：采购次数、均价、价格趋势、历史偏离均值、异常频率、"
+        "最近报价是否持续异常。"
         "当怀疑供应商系统性溢价时调用此工具。"
     )
     input_schema = {
@@ -957,11 +1549,13 @@ class SupplierProfiler(Tool):
                 self._by_supplier[name] = []
             self._by_supplier[name].append(m)
 
-    def execute(self, supplier_name: str, material_category: str = None, **kwargs) -> Dict[str, Any]:
+    def execute(self, supplier_name: str, material_category: str = None,
+                **kwargs) -> Dict[str, Any]:
         records = self._by_supplier.get(supplier_name, [])
         if not records:
             return {
-                "result": {"available": False, "supplier_name": supplier_name, "message": "无该供应商的历史记录"},
+                "result": {"available": False, "supplier_name": supplier_name,
+                           "message": "无该供应商的历史记录"},
                 "confidence": 0.3,
                 "reasoning": f"供应商 {supplier_name} 无历史采购记录，无法建立画像",
             }
@@ -970,25 +1564,28 @@ class SupplierProfiler(Tool):
             records = [r for r in records if r.get("category") == material_category]
         if not records:
             return {
-                "result": {"available": False, "supplier_name": supplier_name, "message": f"无 {material_category or ''} 品类记录"},
+                "result": {"available": False, "supplier_name": supplier_name,
+                           "message": f"无 {material_category or ''} 品类记录"},
                 "confidence": 0.3,
                 "reasoning": f"供应商 {supplier_name} 在 {material_category or '全部品类'} 无记录",
             }
 
+        # === materials 表：采购历史 ===
         prices = [r["unit_price"] for r in records]
         dates = sorted([r.get("order_date", "") for r in records])
         categories = list(set(r.get("category", "") for r in records))
 
         avg_price = sum(prices) / len(prices)
         price_std = (sum((p - avg_price) ** 2 for p in prices) / len(prices)) ** 0.5
+        volatility = round(price_std / avg_price * 100, 1) if avg_price > 0 else 0
 
-        # 简单趋势判断
-        if len(prices) >= 3:
-            recent_avg = sum(prices[-3:]) / min(3, len(prices[-3:]))
-            early_avg = sum(prices[:3]) / min(3, len(prices[:3]))
-            if recent_avg > early_avg * 1.08:
+        # 价格趋势
+        if len(prices) >= 4:
+            recent_avg = sum(prices[-4:]) / min(4, len(prices[-4:]))
+            early_avg = sum(prices[:4]) / min(4, len(prices[:4]))
+            if recent_avg > early_avg * 1.05:
                 trend = "上升"
-            elif recent_avg < early_avg * 0.92:
+            elif recent_avg < early_avg * 0.95:
                 trend = "下降"
             else:
                 trend = "稳定"
@@ -998,74 +1595,171 @@ class SupplierProfiler(Tool):
         result = {
             "available": True,
             "supplier_name": supplier_name,
-            "quote_count": len(records),
+            "purchase_count": len(records),
             "categories_covered": categories,
             "avg_unit_price": round(avg_price, 2),
-            "price_volatility": round(price_std / avg_price * 100, 1) if avg_price > 0 else 0,
+            "price_volatility_pct": volatility,
             "price_trend": trend,
             "first_order": dates[0] if dates else "",
             "last_order": dates[-1] if dates else "",
-            "sample_materials": [
-                {"name": r["name"], "price": r["unit_price"], "date": r.get("order_date", "")}
-                for r in records[:5]
-            ],
         }
 
+        # === quotes 表：偏离分析历史 ===
+        deviation_stats = self._load_deviation_history(supplier_name, material_category)
+        result.update(deviation_stats)
+
+        result["sample_materials"] = [
+            {"name": r["name"], "price": r["unit_price"],
+             "date": r.get("order_date", "")}
+            for r in records[:5]
+        ]
+
+        # 综合评级
+        result["risk_assessment"] = self._assess_risk(result)
+
+        data_points = len(records) + result.get("analyzed_quotes", 0)
         return {
             "result": result,
-            "confidence": round(self.confidence * min(len(records) / 10, 1.0), 3),
+            "confidence": round(self.confidence * min(data_points / 15, 1.0), 3),
             "reasoning": (
-                f"供应商 {supplier_name}：{len(records)} 条记录，"
+                f"供应商 {supplier_name}：{len(records)} 次采购，"
                 f"均价 ¥{avg_price:.2f}，趋势 {trend}，"
-                f"覆盖品类：{', '.join(categories[:3])}"
+                f"{result.get('deviation_summary', '')}"
             ),
         }
 
+    def _load_deviation_history(self, supplier_name: str,
+                                 category: str = None) -> Dict:
+        """从 quotes 表加载该供应商的历史偏离分析"""
+        try:
+            from app.db.database import get_connection
+            conn = get_connection()
+            try:
+                if category:
+                    rows = conn.execute(
+                        """SELECT deviation_score, severity_level, created_at
+                           FROM quotes WHERE supplier_name = ? AND category = ?
+                           ORDER BY created_at DESC LIMIT 50""",
+                        (supplier_name, category),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT deviation_score, severity_level, created_at
+                           FROM quotes WHERE supplier_name = ?
+                           ORDER BY created_at DESC LIMIT 50""",
+                        (supplier_name,),
+                    ).fetchall()
+
+                if not rows:
+                    return {"analyzed_quotes": 0, "deviation_summary": "无分析记录"}
+
+                scores = [r["deviation_score"] for r in rows if r["deviation_score"]]
+                anomalies = [r for r in rows
+                             if r["severity_level"] in ("警示", "紧急")]
+
+                if not scores:
+                    return {"analyzed_quotes": len(rows), "deviation_summary": "无偏离数据"}
+
+                avg_dev = sum(scores) / len(scores)
+
+                # 偏离趋势：最近 vs 整体
+                recent_scores = scores[:min(5, len(scores))]
+                recent_avg = sum(recent_scores) / len(recent_scores)
+
+                if recent_avg > avg_dev * 1.2:
+                    dev_trend = "恶化"
+                elif recent_avg < avg_dev * 0.8:
+                    dev_trend = "改善"
+                else:
+                    dev_trend = "持平"
+
+                return {
+                    "analyzed_quotes": len(rows),
+                    "avg_deviation_score": round(avg_dev, 1),
+                    "recent_avg_deviation": round(recent_avg, 1),
+                    "deviation_trend": dev_trend,
+                    "anomaly_count": len(anomalies),
+                    "anomaly_rate_pct": round(len(anomalies) / len(rows) * 100, 1),
+                    "deviation_summary": (
+                        f"历史偏离均值 {avg_dev:.0f} 分，"
+                        f"异常率 {len(anomalies)/len(rows)*100:.0f}%，"
+                        f"趋势 {dev_trend}"
+                    ),
+                }
+            finally:
+                conn.close()
+        except Exception:
+            return {"analyzed_quotes": 0, "deviation_summary": "加载失败"}
+
+    def _assess_risk(self, profile: Dict) -> str:
+        """综合风险评估"""
+        risks = []
+        if profile.get("price_trend") == "上升":
+            risks.append("价格持续上升")
+        if profile.get("deviation_trend") == "恶化":
+            risks.append("偏离趋势恶化")
+        anomaly_rate = profile.get("anomaly_rate_pct", 0)
+        if anomaly_rate > 30:
+            risks.append(f"异常率高({anomaly_rate}%)")
+        if profile.get("price_volatility_pct", 0) > 25:
+            risks.append("价格波动大")
+
+        if not risks:
+            return "低风险"
+        elif len(risks) == 1:
+            return f"中低风险：{risks[0]}"
+        elif len(risks) == 2:
+            return f"中风险：{risks[0]}，{risks[1]}"
+        else:
+            return f"高风险：{'；'.join(risks)}"
+
 
 class PeerComparer(Tool):
-    """同类供应商价格对比 — 同品类物料在不同供应商间的价格水平对比"""
+    """同类供应商价格对比 — 四分位分布 + 统计显著性"""
 
     name = "tool_compare_peer_price"
     description = (
-        "对比同类物料在不同供应商间的报价水平。"
-        "输入物料品类和材质，返回各供应商的均价、最高/最低价、报价次数。"
-        "用于判断当前报价是否明显高于同行。"
+        "对比同类物料在不同供应商间的价格水平。"
+        "返回：同行四分位分布（Q1/Q2/Q3）、IQR 异常检测、"
+        "当前报价的 z-score 和百分位排名。"
+        "用于判断当前报价是否在统计意义上显著偏高。"
     )
     input_schema = {
         "type": "object",
         "properties": {
             "material_category": {"type": "string", "description": "物料品类"},
             "material_type": {"type": "string", "description": "材质类型（可选）"},
-            "current_supplier": {"type": "string", "description": "当前供应商名称（用于高亮）"},
+            "current_supplier": {"type": "string", "description": "当前供应商名称"},
             "current_price": {"type": "number", "description": "当前报价金额"},
         },
         "required": ["material_category", "current_supplier", "current_price"],
     }
-    confidence = 0.80
+    confidence = 0.82
     model_loaded = False
 
     def __init__(self, materials_data: List[Dict]):
         self.materials = materials_data
 
     def execute(self, material_category: str, current_supplier: str,
-                current_price: float, material_type: str = None, **kwargs) -> Dict[str, Any]:
-        # 筛选同品类物料
+                current_price: float, material_type: str = None,
+                **kwargs) -> Dict[str, Any]:
+        import numpy as np
+
         peers = [m for m in self.materials if m.get("category") == material_category]
         if material_type:
-            type_filtered = [m for m in peers if m.get("material_type") == material_type]
-            if type_filtered:
-                peers = type_filtered
+            filtered = [m for m in peers if m.get("material_type") == material_type]
+            if filtered:
+                peers = filtered
 
-        # 排除当前供应商
         peers = [m for m in peers if m.get("supplier_name") != current_supplier]
         if not peers:
             return {
                 "result": {"available": False, "message": "无同类供应商数据"},
                 "confidence": 0.3,
-                "reasoning": f"品类 {material_category} 无其他供应商记录，无法对比",
+                "reasoning": f"品类 {material_category} 无其他供应商记录",
             }
 
-        # 按供应商分组
+        # 按供应商分组统计
         by_supplier: Dict[str, List[float]] = {}
         for m in peers:
             name = m.get("supplier_name", "")
@@ -1076,19 +1770,55 @@ class PeerComparer(Tool):
         peer_summary = []
         all_prices = []
         for name, prices in by_supplier.items():
-            avg = sum(prices) / len(prices)
+            arr = np.array(prices)
             all_prices.extend(prices)
             peer_summary.append({
                 "supplier": name,
-                "avg_price": round(avg, 2),
-                "min_price": min(prices),
-                "max_price": max(prices),
+                "avg_price": round(float(np.mean(arr)), 2),
+                "median_price": round(float(np.median(arr)), 2),
+                "min_price": float(np.min(arr)),
+                "max_price": float(np.max(arr)),
+                "std": round(float(np.std(arr)), 2),
                 "quote_count": len(prices),
             })
-
         peer_summary.sort(key=lambda x: x["avg_price"])
 
-        overall_avg = sum(all_prices) / len(all_prices)
+        # 四分位分析
+        all_arr = np.array(all_prices)
+        q1 = float(np.percentile(all_arr, 25))
+        q2 = float(np.percentile(all_arr, 50))
+        q3 = float(np.percentile(all_arr, 75))
+        iqr = q3 - q1
+        upper_fence = q3 + 1.5 * iqr
+        lower_fence = q1 - 1.5 * iqr
+
+        # z-score
+        mean = float(np.mean(all_arr))
+        std = float(np.std(all_arr))
+        z_score = round((current_price - mean) / std, 2) if std > 0 else 0
+
+        # 百分位排名
+        percentile = round(float(np.sum(all_arr < current_price) / len(all_arr) * 100), 1)
+
+        # 异常判定
+        if z_score > 2.0:
+            outlier_level = "显著偏高（z > 2.0）"
+            is_outlier = True
+        elif current_price > upper_fence:
+            outlier_level = f"偏高（超 Q3+1.5×IQR = ¥{upper_fence:.1f}）"
+            is_outlier = True
+        elif z_score > 1.0:
+            outlier_level = "略高于同行均值"
+            is_outlier = False
+        elif z_score < -2.0:
+            outlier_level = "显著偏低"
+            is_outlier = True
+        else:
+            outlier_level = "在正常范围内"
+            is_outlier = False
+
+        # 同行均价
+        overall_avg = mean
         premium = (current_price - overall_avg) / overall_avg * 100 if overall_avg > 0 else 0
 
         result = {
@@ -1096,12 +1826,24 @@ class PeerComparer(Tool):
             "category": material_category,
             "material_type": material_type or "全部",
             "peer_count": len(peer_summary),
+            "data_points": len(all_prices),
+            # 基本对比
             "peer_avg_price": round(overall_avg, 2),
-            "peer_min_price": round(min(all_prices), 2),
-            "peer_max_price": round(max(all_prices), 2),
+            "peer_median_price": round(q2, 2),
+            "peer_min_price": round(float(np.min(all_arr)), 2),
+            "peer_max_price": round(float(np.max(all_arr)), 2),
+            # 分布统计
+            "quartiles": {"Q1": round(q1, 2), "Q2": round(q2, 2), "Q3": round(q3, 2)},
+            "iqr": round(iqr, 2),
+            "upper_fence": round(upper_fence, 2),
+            # 当前报价统计位置
             "current_price": current_price,
             "current_premium_pct": round(premium, 1),
-            "current_vs_peers": "明显偏高" if premium > 20 else ("略高" if premium > 10 else "正常"),
+            "z_score": z_score,
+            "percentile_rank": percentile,
+            "outlier_level": outlier_level,
+            "is_statistical_outlier": is_outlier,
+            # 同行明细
             "peer_details": peer_summary,
             "excluded_supplier": current_supplier,
         }
@@ -1110,83 +1852,163 @@ class PeerComparer(Tool):
             "result": result,
             "confidence": round(self.confidence * min(len(peer_summary) / 3, 1.0), 3),
             "reasoning": (
-                f"品类 {material_category} 共 {len(peer_summary)} 家同行，"
-                f"均价 ¥{overall_avg:.2f}，当前报价 ¥{current_price}（{'偏高' if premium > 0 else '偏低'} {abs(premium):.0f}%）"
+                f"品类 {material_category}：{len(peer_summary)} 家同行，"
+                f"Q1=¥{q1:.1f} Q2=¥{q2:.1f} Q3=¥{q3:.1f}，"
+                f"当前报价 ¥{current_price}（z={z_score}，P{percentile:.0f}），"
+                f"{outlier_level}"
             ),
         }
 
 
 class MarketTrendChecker(Tool):
-    """市场行情查询 — 原材料价格走势、行业参考区间"""
+    """市场行情查询 — 时序数据分析 + 趋势回归"""
 
     name = "tool_check_market_trend"
     description = (
-        "查询原材料市场行情走势和行业参考价格区间。"
-        "用于判断偏离是否由市场行情驱动。"
-        "当前数据源为行业基准 + 外部参考，置信度取决于数据新鲜度。"
+        "查询原材料市场价格走势，基于时序数据做线性回归趋势判断。"
+        "返回：近 24 周价格趋势（上涨/下跌/稳定）、趋势斜率、当前价格区间。"
+        "用于判断供应商报价偏离是否由原材料行情驱动。"
     )
     input_schema = {
         "type": "object",
         "properties": {
             "material_category": {"type": "string", "description": "物料品类"},
-            "material_type": {"type": "string", "description": "材质类型（可选）"},
+            "material_type": {"type": "string", "description": "材质类型（可选，用于精确匹配）"},
         },
         "required": ["material_category"],
     }
-    confidence = 0.70
+    confidence = 0.75
     model_loaded = False
+
+    # 品类到原材料的映射（用于查 raw_material_prices）
+    CATEGORY_TO_MATERIAL = {
+        "塑料外壳": ["ABS", "PC", "PP", "PA66"],
+        "PCB板": ["FR-4", "铜箔"],
+        "按键": ["硅胶", "TPU"],
+        "袖带": ["尼龙", "TPU"],
+        "连接器": ["铜合金"],
+    }
 
     def __init__(self, external_refs: List[Dict], benchmarks: Dict):
         self.external_refs = {ref["material_category"]: ref for ref in external_refs}
         self.benchmarks = benchmarks
 
-    def execute(self, material_category: str, material_type: str = None, **kwargs) -> Dict[str, Any]:
-        ref = self.external_refs.get(material_category)
-        if not ref:
-            return {
-                "result": {"available": False, "category": material_category, "message": "该品类无外部行情数据"},
-                "confidence": 0.3,
-                "reasoning": f"品类 {material_category} 无外部行情数据，无法判断市场趋势",
-            }
+    def execute(self, material_category: str, material_type: str = None,
+                **kwargs) -> Dict[str, Any]:
+        # 1. 从时序表读取原材料价格数据
+        ts_data = self._load_time_series(material_category, material_type)
 
-        price_low = ref.get("price_low", 0)
-        price_high = ref.get("price_high", 0)
-        source = ref.get("source", "未知来源")
-        count = ref.get("sample_count", 0)
-
-        # 从 benchmark 中提取成本比例作为补充信息
-        bench_key_map = {
-            "塑料外壳": "plastic_injection",
-            "PCB板": "pcb",
-            "传感器": "sensor",
-            "按键": "silicone",
-            "袖带": "cuff",
-        }
-        bench_key = bench_key_map.get(material_category, "plastic_injection")
-        bench = self.benchmarks.get(bench_key, {})
+        # 2. 从 external_references 读取最新参考价（可能已被联网刷新）
+        ref = self.external_refs.get(material_category, {})
 
         result = {
             "available": True,
             "category": material_category,
             "material_type": material_type or "全部",
-            "market_price_range": f"¥{price_low:.2f} ~ ¥{price_high:.2f}",
-            "price_low": price_low,
-            "price_high": price_high,
-            "source": source,
-            "sample_count": count,
-            "data_freshness": "需确认更新时间",
-            "trend": "需更多时序数据判断",
-            "cost_structure_benchmark": bench,
-            "note": "当前为静态参考数据，未接入实时行情",
+            "price_low": ref.get("price_low"),
+            "price_high": ref.get("price_high"),
+            "source": ref.get("source", "行业基准"),
         }
+
+        if ts_data:
+            trend_result = self._analyze_trend(ts_data)
+            result.update(trend_result)
+            result["data_freshness"] = f"最新 {ts_data[-1]['date']}"
+            confidence = trend_result.get("confidence", 0.6)
+        else:
+            result["trend"] = "无时序数据"
+            result["trend_detail"] = "raw_material_prices 表中无该品类的原材料数据"
+            result["current_price"] = ref.get("price_low")
+            confidence = 0.4
 
         return {
             "result": result,
-            "confidence": round(self.confidence * min(count / 50, 1.0), 3),
+            "confidence": round(self.confidence * confidence, 3),
             "reasoning": (
-                f"品类 {material_category}：外部参考 ¥{price_low:.2f}~¥{price_high:.2f}（{source}），"
-                f"样本量 {count}，{'数据充足' if count >= 20 else '数据有限，置信度较低'}"
+                f"{material_category}："
+                f"{result.get('trend_detail', '无趋势数据')}，"
+                f"参考价 ¥{result.get('price_low', '?')}~¥{result.get('price_high', '?')}"
             ),
+        }
+
+    def _load_time_series(self, category: str, material_type: str = None) -> List[Dict]:
+        """从 raw_material_prices 表加载时序数据"""
+        try:
+            from app.db.database import get_connection
+            # 品类 → 材料类型映射
+            mat_types = self.CATEGORY_TO_MATERIAL.get(category, [])
+            if material_type and material_type not in mat_types:
+                mat_types.append(material_type)
+
+            if not mat_types:
+                return []
+
+            conn = get_connection()
+            try:
+                placeholders = ",".join("?" for _ in mat_types)
+                rows = conn.execute(
+                    f"""SELECT material_type, unit_price, price_date, unit
+                        FROM raw_material_prices
+                        WHERE material_type IN ({placeholders})
+                        ORDER BY price_date ASC""",
+                    mat_types,
+                ).fetchall()
+                return [{"type": r["material_type"], "price": r["unit_price"],
+                         "date": r["price_date"], "unit": r["unit"]}
+                        for r in rows]
+            finally:
+                conn.close()
+        except Exception:
+            return []
+
+    def _analyze_trend(self, data: List[Dict]) -> Dict:
+        """线性回归趋势分析"""
+        import numpy as np
+
+        if len(data) < 4:
+            return {"trend": "数据不足", "trend_detail": f"仅 {len(data)} 个数据点",
+                    "confidence": 0.3}
+
+        # 按周聚合均价
+        prices = np.array([d["price"] for d in data])
+        weeks = np.arange(len(prices))
+
+        # 线性回归
+        slope, intercept = np.polyfit(weeks, prices, 1)
+        trend_strength = abs(slope) / (np.mean(prices) / len(prices)) * 100 if np.mean(prices) > 0 else 0
+
+        # 趋势判定
+        if trend_strength > 2:
+            trend = "上涨" if slope > 0 else "下跌"
+        elif trend_strength > 0.5:
+            trend = "小幅上涨" if slope > 0 else "小幅下跌"
+        else:
+            trend = "稳定"
+
+        # 最近 4 周 vs 最早 4 周的变化
+        recent = np.mean(prices[-4:]) if len(prices) >= 4 else np.mean(prices)
+        early = np.mean(prices[:4])
+        change_pct = (recent - early) / early * 100 if early > 0 else 0
+
+        current = float(prices[-1])
+        avg = float(np.mean(prices))
+        low = float(np.min(prices))
+        high = float(np.max(prices))
+
+        return {
+            "trend": trend,
+            "trend_detail": (
+                f"{data[0]['type']}：近 {len(data)} 周 {'↑' if slope > 0 else '↓'}"
+                f"{abs(change_pct):.1f}%（¥{early:.2f}→¥{recent:.2f}），"
+                f"当前 ¥{current:.2f}/{data[0]['unit']}"
+            ),
+            "current_price": current,
+            "avg_price": avg,
+            "price_range_24w": f"¥{low:.2f}~¥{high:.2f}",
+            "change_pct_24w": round(change_pct, 1),
+            "trend_slope_per_week": round(float(slope), 4),
+            "data_points": len(data),
+            "confidence": round(min(0.9, 0.5 + len(data) / 100), 2),
         }
 
 
@@ -1213,28 +2035,79 @@ class UrgencyChecker(Tool):
     def __init__(self):
         pass
 
-    def execute(self, material_id: str, material_name: str = None, **kwargs) -> Dict[str, Any]:
-        result = {
-            "available": False,
-            "material_id": material_id,
-            "material_name": material_name or "",
-            "inventory_level": "未知",
-            "daily_consumption": "未知",
-            "days_remaining": "未知",
-            "urgency": "无法判断",
-            "can_negotiate": "无法判断",
-            "data_source": "模拟",
-            "note": "库存数据需要对接 ERP/WMS 系统，当前为占位实现",
-        }
+    def execute(self, material_id: str, material_name: str = None,
+                **kwargs) -> Dict[str, Any]:
+        # 从 inventory 表查询
+        inv = self._query_inventory(material_id)
+
+        if inv:
+            days = inv["days_remaining"]
+            urgency = inv["urgency"]
+
+            if days <= 3:
+                can_negotiate = False
+                suggestion = "库存仅够3天，必须立即采购，无议价空间"
+            elif days <= 7:
+                can_negotiate = False
+                suggestion = "库存紧张，优先保障供应，议价空间有限"
+            elif days <= 14:
+                can_negotiate = True
+                suggestion = "库存尚可，有1-2周时间进行议价或二次询价"
+            else:
+                can_negotiate = True
+                suggestion = f"库存充裕（{days}天），有充足时间谈判或寻找替代供应商"
+
+            result = {
+                "available": True,
+                "material_id": material_id,
+                "material_name": inv.get("material_name", material_name or ""),
+                "current_stock": inv["current_stock"],
+                "safety_stock": inv["safety_stock"],
+                "daily_consumption": inv["daily_consumption"],
+                "days_remaining": days,
+                "urgency": urgency,
+                "can_negotiate": can_negotiate,
+                "suggestion": suggestion,
+                "last_restock_date": inv.get("last_restock_date", ""),
+                "data_source": "inventory表（模拟数据）",
+            }
+            confidence = 0.45  # 模拟数据
+        else:
+            result = {
+                "available": False,
+                "material_id": material_id,
+                "material_name": material_name or "",
+                "inventory_level": "未知",
+                "urgency": "无法判断",
+                "can_negotiate": True,
+                "suggestion": "无库存数据，建议由采购人员人工判断紧急程度",
+                "data_source": "无",
+            }
+            confidence = 0.2
 
         return {
             "result": result,
-            "confidence": 0.3,
+            "confidence": confidence,
             "reasoning": (
-                f"物料 {material_id}：库存数据不可用，无法判断紧急度。"
-                "建议由采购人员人工判断是否可以延期议价。"
+                f"物料 {material_id}：{result.get('suggestion', '')}"
             ),
         }
+
+    def _query_inventory(self, material_id: str) -> Optional[Dict]:
+        try:
+            from app.db.database import get_connection
+            conn = get_connection()
+            try:
+                row = conn.execute(
+                    """SELECT * FROM inventory WHERE material_id = ?
+                       ORDER BY updated_at DESC LIMIT 1""",
+                    (material_id,),
+                ).fetchone()
+                return dict(row) if row else None
+            finally:
+                conn.close()
+        except Exception:
+            return None
 
 
 class AlternativeSupplierFinder(Tool):
@@ -1310,13 +2183,13 @@ class AlternativeSupplierFinder(Tool):
 
 
 class CostAnomalyAnalyzer(Tool):
-    """深度成本异常分析 — 定位具体异常成本项，给出解释和追问建议"""
+    """深度成本异常分析 — LLM 动态分析 + 上下文感知"""
 
     name = "tool_analyze_cost_anomaly"
     description = (
-        "对第一阶段成本拆解结果进行深度分析。"
-        "定位偏离最大的成本项，结合品类和工艺特征给出可能的解释，"
-        "以及建议向供应商追问的具体问题。"
+        "对成本拆解结果进行深度分析，结合供应商画像、同行对比、市场行情，"
+        "由 LLM 动态生成针对性的异常解释和谈判建议。"
+        "当成本项出现异常或需要制定具体谈判策略时调用。"
     )
     input_schema = {
         "type": "object",
@@ -1334,28 +2207,10 @@ class CostAnomalyAnalyzer(Tool):
     model_loaded = False
 
     def __init__(self):
-        self._explanation_templates = {
-            "原材料": {
-                "偏高": ["原材料等级高于行业标准", "供应商采购渠道成本偏高", "材料牌号使用了更贵的规格"],
-                "偏低": ["使用了回收料或低等级材料", "大批量采购折扣", "供应商自有上游渠道"],
-            },
-            "加工费": {
-                "偏高": ["模具复杂度高于同类物料", "工时估算偏高", "小批量导致换线成本高"],
-                "偏低": ["自动化程度高", "大批量摊薄固定成本", "工艺简化"],
-            },
-            "表面处理": {
-                "偏高": ["特殊处理工艺（如医疗级）", "外发加工增加成本"],
-                "偏低": ["简化了表面处理工序"],
-            },
-            "包装物流": {
-                "偏高": ["特殊包装要求", "远距离运输"],
-                "偏低": ["近距离本地配送", "简易包装"],
-            },
-            "管理+利润": {
-                "偏高": ["供应商利润率偏高", "品牌溢价", "代理商加价"],
-                "偏低": ["供应商策略性低价（抢占份额）"],
-            },
-        }
+        self._api_key = os.environ.get("KIMI_API_KEY", "")
+        self._base_url = os.environ.get("KIMI_BASE_URL",
+                                         "https://ai-gateway.ailab.jiuan.com/v1")
+        self._model = os.environ.get("KIMI_MODEL", "kimi-k2.5")
 
     def execute(self, cost_analysis: Dict, supplier_quote: float,
                 material_category: str, **kwargs) -> Dict[str, Any]:
@@ -1367,54 +2222,141 @@ class CostAnomalyAnalyzer(Tool):
                 "reasoning": "缺少成本拆解数据，无法进行深度分析",
             }
 
-        # 按偏离程度排序
-        abnormal = [c for c in cost_items if c.get("status") not in ("正常",)]
-        abnormal.sort(key=lambda x: abs(x.get("deviation", 0)), reverse=True)
+        # 异常项
+        abnormal = [c for c in cost_items
+                    if c.get("status") not in ("参考值", "在市场范围内")]
+        abnormal.sort(key=lambda x: abs(x.get("deviation_from_reasonable", 0)),
+                      reverse=True)
 
-        analysis = []
-        for item in abnormal[:3]:
-            item_name = item.get("item", "")
-            status = item.get("status", "")
-            deviation = item.get("deviation", 0)
+        # 提取上下文（从 kwargs 获取诊断阶段已收集的信息）
+        supplier_ctx = kwargs.get("supplier_profile", {})
+        peer_ctx = kwargs.get("peer_benchmark", {})
+        market_ctx = kwargs.get("market_context", {})
 
-            direction = "偏高" if deviation > 0 else "偏低"
-            templates = self._explanation_templates.get(item_name, {}).get(direction, ["需进一步分析"])
+        # LLM 动态分析
+        if self._api_key and abnormal:
+            llm_analysis = self._query_llm_analysis(
+                cost_items, abnormal, supplier_quote, material_category,
+                supplier_ctx, peer_ctx, market_ctx,
+            )
+        else:
+            llm_analysis = None
 
-            analysis.append({
-                "item": item_name,
-                "deviation_pct": deviation,
-                "direction": direction,
-                "supplier_pct": item.get("supplier_pct", 0),
-                "benchmark_pct": item.get("benchmark_pct", 0),
-                "possible_explanations": templates,
-                "suggested_questions": [
-                    f"请供应商提供 {item_name} 的明细构成",
-                    f"确认 {item_name} 是否有特殊要求导致成本{'增加' if deviation > 0 else '减少'}",
-                ],
-            })
-
-        primary = analysis[0] if analysis else None
-        result = {
-            "available": True,
-            "category": material_category,
-            "total_anomaly_items": len(abnormal),
-            "primary_anomaly": primary,
-            "all_anomalies": analysis,
-            "summary": (
-                f"共 {len(abnormal)} 项异常，"
-                + (f"最大异常项为 {primary['item']}（{primary['direction']} {abs(primary['deviation_pct']):.0f}%）"
-                   if primary else "无显著异常")
-            ),
-        }
+        if llm_analysis:
+            result = llm_analysis
+            result["available"] = True
+            result["analysis_method"] = "LLM"
+        else:
+            # 兜底：简化版规则分析
+            simplified = []
+            for item in abnormal[:3]:
+                simplified.append({
+                    "item": item["item"],
+                    "status": item["status"],
+                    "deviation": item.get("deviation_from_reasonable", 0),
+                    "possible_reasons": [
+                        "供应商报价整体偏高，建议对比同行价格",
+                        "要求供应商提供该项目的成本明细",
+                    ],
+                })
+            result = {
+                "available": True,
+                "category": material_category,
+                "total_anomaly_items": len(abnormal),
+                "anomalies": simplified,
+                "analysis_method": "rule",
+                "summary": f"共 {len(abnormal)} 项异常，需供应商提供成本明细进一步分析",
+            }
 
         return {
             "result": result,
-            "confidence": round(self.confidence, 3),
+            "confidence": round(self.confidence * (0.9 if llm_analysis else 0.6), 3),
             "reasoning": (
-                f"成本深度分析：{result['summary']}。"
-                + (f"可能原因：{'; '.join(primary['possible_explanations'][:2])}" if primary else "")
+                f"成本深度分析（{'LLM' if llm_analysis else '规则'}）："
+                f"{result.get('summary', '')}"
             ),
         }
+
+    def _query_llm_analysis(self, cost_items: List, abnormal: List,
+                             quote: float, category: str,
+                             supplier_ctx: Dict, peer_ctx: Dict,
+                             market_ctx: Dict) -> Optional[Dict]:
+        """调用 LLM 做上下文感知的成本异常分析"""
+        import json as _json
+        import httpx
+        from openai import OpenAI
+
+        # 构造上下文
+        items_text = "\n".join(
+            f"- {c['item']}: 合理=¥{c.get('reasonable_amount','?')} "
+            f"隐含=¥{c.get('implied_amount','?')} "
+            f"偏离={c.get('deviation_from_reasonable','?')}% "
+            f"状态={c.get('status','?')} "
+            f"验证={'✓' if c.get('independently_verified') else '✗'}"
+            for c in cost_items
+        )
+        supplier_text = (
+            f"采购{ supplier_ctx.get('purchase_count','?')}次，"
+            f"历史偏离均值{supplier_ctx.get('avg_deviation_score','?')}分，"
+            f"风险{supplier_ctx.get('risk_assessment','?')}"
+            if supplier_ctx else "无供应商画像"
+        )
+        peer_text = (
+            f"同行{peer_ctx.get('peer_count','?')}家，"
+            f"Q1=¥{peer_ctx.get('quartiles',{}).get('Q1','?')} "
+            f"Q3=¥{peer_ctx.get('quartiles',{}).get('Q3','?')}，"
+            f"当前z-score={peer_ctx.get('z_score','?')}"
+            if peer_ctx else "无同行对比"
+        )
+        market_text = (
+            f"行情{market_ctx.get('trend','?')}，"
+            f"{market_ctx.get('trend_detail','')}"
+            if market_ctx else "无市场行情"
+        )
+
+        prompt = f"""你是一位采购成本分析师。请分析以下报价的成本结构异常。
+
+## 报价信息
+品类: {category}，总价: ¥{quote}
+
+## 成本拆解
+{items_text}
+
+## 背景信息
+- 供应商: {supplier_text}
+- 同行对比: {peer_text}
+- 市场行情: {market_text}
+
+## 要求
+返回 JSON（不要 markdown）：
+{{
+  "summary": "一句话总结核心发现（30字）",
+  "root_cause_analysis": "根因分析（60字），结合供应商画像、同行对比、市场行情",
+  "anomalies": [
+    {{"item": "成本项", "severity": "高/中/低", "explanation": "具体解释（20字）",
+      "negotiation_tip": "谈判建议（30字）"}}
+  ],
+  "negotiation_strategy": "整体谈判策略建议（50字）"
+}}
+
+只返回 JSON。"""
+
+        try:
+            client = OpenAI(api_key=self._api_key, base_url=self._base_url,
+                          timeout=httpx.Timeout(20.0, connect=5.0))
+            resp = client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3, max_tokens=500,
+            )
+            content = resp.choices[0].message.content or ""
+            content = content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
+            return _json.loads(content)
+        except Exception as e:
+            print(f"[CostAnomalyAnalyzer] LLM failed: {e}")
+            return None
 
 
 # =============================================================================
@@ -1462,7 +2404,7 @@ class AgentOrchestrator:
         # ===== 第一阶段 Skills（确定性体检） =====
         self.matcher = SimilarityMatcher(self.materials)
         self.predictor = PricePredictor(self.materials)
-        self.cost_analyzer = CostAnalyzer(self.benchmarks)
+        self.cost_analyzer = CostAnalyzer(self.benchmarks, self.external_refs)
         self.scorer = AnomalyScorer(self.external_refs)
         self.solution_gen = SolutionGenerator()
 
@@ -1470,6 +2412,7 @@ class AgentOrchestrator:
         self.supplier_profiler = SupplierProfiler(self.materials)
         self.peer_comparer = PeerComparer(self.materials)
         self.market_checker = MarketTrendChecker(self.external_refs, self.benchmarks)
+        self.market_price_lookup = MarketPriceLookup()
         self.urgency_checker = UrgencyChecker()
         self.alternative_finder = AlternativeSupplierFinder(self.materials)
         self.cost_anomaly_analyzer = CostAnomalyAnalyzer()
@@ -1489,6 +2432,7 @@ class AgentOrchestrator:
         self.registry.register(self.supplier_profiler)
         self.registry.register(self.peer_comparer)
         self.registry.register(self.market_checker)
+        self.registry.register(self.market_price_lookup)
         self.registry.register(self.urgency_checker)
         self.registry.register(self.alternative_finder)
         self.registry.register(self.cost_anomaly_analyzer)
@@ -1705,6 +2649,7 @@ __all__ = [
     'SupplierProfiler',
     'PeerComparer',
     'MarketTrendChecker',
+    'MarketPriceLookup',
     'UrgencyChecker',
     'AlternativeSupplierFinder',
     'CostAnomalyAnalyzer',

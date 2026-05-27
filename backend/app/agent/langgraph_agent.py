@@ -204,21 +204,61 @@ def node_run_baseline(state: AgentState, registry: ToolRegistry) -> AgentState:
         tool_reasoning=out.get("reasoning"),
     )
 
-    # 2. 成本拆解
+    # 1.5 行情刷新（缓存过期时联网更新，确保成本拆解用到新鲜数据）
+    try:
+        from datetime import datetime as _dt
+        from app.db.database import get_connection
+        cat = mat.get("category", "")
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT updated_at FROM external_references WHERE material_category = ?",
+                (cat,),
+            ).fetchone()
+            need_refresh = True
+            if row and row["updated_at"]:
+                try:
+                    age = (_dt.now() - _dt.fromisoformat(row["updated_at"])).total_seconds()
+                    need_refresh = age > 86400  # 超过 24 小时
+                except (ValueError, TypeError):
+                    pass
+        finally:
+            conn.close()
+
+        if need_refresh:
+            t0_refresh = time.perf_counter()
+            lookup = registry.get("tool_search_market_price")
+            out = lookup.execute(material_category=cat,
+                                 material_type=mat.get("material_type", ""))
+            if out.get("result", {}).get("searched"):
+                _append_trace(
+                    state, "行情刷新(联网)", "completed",
+                    f"已更新 {cat} 市场行情: "
+                    f"¥{out['result'].get('price_low')}~¥{out['result'].get('price_high')}",
+                    (time.perf_counter() - t0_refresh) * 1000,
+                    tool_name="tool_search_market_price",
+                )
+    except Exception:
+        pass  # 刷新失败不阻塞流程
+
+    # 2. 成本拆解（传入贝叶斯 P50 作为锚点 + 新鲜行情数据）
     t0 = time.perf_counter()
     tool = registry.get("tool_analyze_cost_structure")
+    pred = state.get("prediction") or {}
     out = tool.execute(
         material_id=mat["id"],
         supplier_quote=qd.get("supplier_quote", 0),
         category=mat.get("category"),
         processing=mat.get("processing"),
+        prediction_p50=pred.get("p50"),  # 贝叶斯合理价作为锚点
     )
     state["cost_analysis"] = out.get("result") or {}
     ca = state["cost_analysis"]
     _append_trace(
         state, "成本拆解", "completed",
-        f"成本偏离分={ca.get('cost_deviation_score', 0)}, "
-        f"异常项={sum(1 for c in ca.get('cost_items', []) if c.get('status') not in ('正常',))}",
+        f"锚点=¥{ca.get('anchor_price', 'N/A')}, "
+        f"异常项={ca.get('anomaly_count', 0)}, "
+        f"原材料交叉验证={'已完成' if ca.get('cost_items', [{}])[0].get('independently_verified') else '未完成'}",
         (time.perf_counter() - t0) * 1000,
         tool_name="tool_analyze_cost_structure",
         tool_confidence=out.get("confidence"),
@@ -358,6 +398,7 @@ DIAGNOSTIC_TOOL_NAMES = [
     "tool_get_supplier_profile",
     "tool_compare_peer_price",
     "tool_check_market_trend",
+    "tool_search_market_price",
     "tool_check_urgency",
     "tool_search_alternatives",
     "tool_analyze_cost_anomaly",
@@ -492,6 +533,12 @@ def node_execute_diagnostic_tool(state: AgentState, registry: ToolRegistry) -> A
         except (json.JSONDecodeError, TypeError):
             args = {}
 
+        # 注入诊断上下文（供 CostAnomalyAnalyzer 等工具使用）
+        if tool_name == "tool_analyze_cost_anomaly":
+            args.setdefault("supplier_profile", state.get("supplier_profile", {}))
+            args.setdefault("peer_benchmark", state.get("peer_benchmark", {}))
+            args.setdefault("market_context", state.get("market_context", {}))
+
         try:
             tool = registry.get(tool_name)
             result = tool.execute(**args)
@@ -546,6 +593,8 @@ def _dispatch_diagnostic_result(
         state["supplier_profile"] = result_data
     elif tool_name == "tool_compare_peer_price" and isinstance(result_data, dict):
         state["peer_benchmark"] = result_data
+    elif tool_name == "tool_search_market_price" and isinstance(result_data, dict):
+        state["market_context"] = result_data  # 与 market_trend 共用字段
     elif tool_name == "tool_check_market_trend" and isinstance(result_data, dict):
         state["market_context"] = result_data
     elif tool_name == "tool_check_urgency" and isinstance(result_data, dict):
@@ -865,7 +914,9 @@ def _build_diagnosis_system_prompt(state: AgentState) -> str:
    - 成本偏离高 → 可能是工艺复杂度被低估
 2. 查供应商历史 → tool_get_supplier_profile
 3. 比同行价格 → tool_compare_peer_price
-4. 查市场行情 → tool_check_market_trend（如偏离模式指向行情）
+4. 查市场行情 → tool_check_market_trend（静态参考）或 tool_search_market_price（联网实时查询）
+   - 优先用 tool_search_market_price 获取当前市场价格
+   - 偏离模式指向行情驱动时，必须调用此工具验证
 5. 深挖成本 → tool_analyze_cost_anomaly（如成本项异常）
 6. 查紧急度 → tool_check_urgency（判断是否有时间议价）
 7. 找替代 → tool_search_alternatives（准备备选方案）
@@ -874,7 +925,8 @@ def _build_diagnosis_system_prompt(state: AgentState) -> str:
 ## 可用工具
 - tool_get_supplier_profile：查供应商历史偏离趋势
 - tool_compare_peer_price：同类物料同行价格对比
-- tool_check_market_trend：原材料市场行情
+- tool_check_market_trend：原材料市场行情（静态参考数据）
+- tool_search_market_price：联网搜索当前市场行情（实时价格，优先使用）
 - tool_check_urgency：库存/紧急度查询
 - tool_search_alternatives：检索替代供应商
 - tool_analyze_cost_anomaly：深度成本异常分析

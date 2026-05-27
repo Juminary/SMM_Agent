@@ -14,7 +14,7 @@ import {
   TrendingDown,
   Activity
 } from 'lucide-react'
-import { analyzeQuote, fetchSimilarMaterials, fetchPricePrediction, calculateDeviation } from '../utils/api'
+import { analyzeQuote, fetchSimilarMaterials, fetchExternalReferences } from '../utils/api'
 
 // 预设模板
 const templates = {
@@ -169,37 +169,31 @@ export default function NewQuote() {
         }))
       }
 
-      // 2. 获取价格预测（当类别变化时）
+      // 2+3. 获取外部参考数据（价格预测 + 偏离度估算，一次请求）
       if (category) {
-        const priceRes = await fetchPricePrediction(category)
-        if (priceRes.references.length > 0) {
-          const ref = priceRes.references[0]
-          setRealtimeAnalysis(prev => ({
-            ...prev,
-            pricePrediction: {
-              low: ref.price_low,
-              high: ref.price_high,
-              mid: (ref.price_low + ref.price_high) / 2
-            }
-          }))
-        }
-      }
-
-      // 3. 计算偏离度（当有报价和类别时）
-      if (supplier_quote && category) {
-        const quote = parseFloat(supplier_quote)
-        if (!isNaN(quote) && quote > 0) {
-          const deviationRes = await calculateDeviation({ supplier_quote: quote, category })
-          if (deviationRes) {
-            const status = deviationRes.deviation < 20 ? '正常' :
-                          deviationRes.deviation < 40 ? '关注' :
-                          deviationRes.deviation < 60 ? '警示' : '紧急'
+        try {
+          const extRes = await fetchExternalReferences(category)
+          if (extRes.references?.length > 0) {
+            const ref = extRes.references[0]
+            const mid = (ref.price_low + ref.price_high) / 2
             setRealtimeAnalysis(prev => ({
               ...prev,
-              deviation: { value: deviationRes.deviation, status }
+              pricePrediction: { low: ref.price_low, high: ref.price_high, mid },
             }))
+            // 偏离度估算
+            if (supplier_quote) {
+              const quote = parseFloat(supplier_quote)
+              if (!isNaN(quote) && quote > 0 && mid > 0) {
+                const dev = Math.abs(quote - mid) / mid * 100
+                const status = dev < 20 ? '正常' : dev < 40 ? '关注' : dev < 60 ? '警示' : '紧急'
+                setRealtimeAnalysis(prev => ({
+                  ...prev,
+                  deviation: { value: Math.round(dev * 10) / 10, status },
+                }))
+              }
+            }
           }
-        }
+        } catch (_) { /* ignore */ }
       }
     } catch (err) {
       console.error('Realtime analysis error:', err)

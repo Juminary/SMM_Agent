@@ -1,95 +1,36 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Zap,
-  Brain,
-  Database,
-  Search,
-  Calculator,
-  TrendingDown,
-  Lightbulb,
-  ChevronRight,
-  Play,
-  RotateCcw,
-  CheckCircle,
-  AlertTriangle,
-  Clock,
-  Sparkles,
-  ArrowRight,
-  BarChart3,
-  GitBranch,
-  MessageSquare,
-  RefreshCw,
-  Loader2
+  Zap, Brain, Database, Search, Calculator, TrendingDown, Lightbulb,
+  Play, RotateCcw, CheckCircle, AlertTriangle, Sparkles, ArrowRight,
+  BarChart3, GitBranch, Shield, User, Globe, Wrench, Clock, Activity,
 } from 'lucide-react'
 import { analyzeQuote } from '../utils/api'
-import type { Quote, Solution } from '../types'
+import type { Quote } from '../types'
 
-// 演示节点定义
-const DEMO_NODES = [
-  {
-    id: 'material',
-    label: '物料构造',
-    icon: Database,
-    color: 'blue',
-    colorClass: 'bg-blue-50 border-blue-300 text-blue-600',
-    textClass: 'text-blue-600',
-    colorDot: 'bg-blue-500',
-    desc: '结构化物料基础信息',
-  },
-  {
-    id: 'similar',
-    label: '相似物料检索',
-    icon: Search,
-    color: 'purple',
-    colorClass: 'bg-purple-50 border-purple-300 text-purple-600',
-    textClass: 'text-purple-600',
-    colorDot: 'bg-purple-500',
-    desc: '向量检索 Top-5 相似历史报价',
-  },
-  {
-    id: 'price',
-    label: '价格区间预测',
-    icon: Calculator,
-    color: 'cyan',
-    colorClass: 'bg-cyan-50 border-cyan-300 text-cyan-600',
-    textClass: 'text-cyan-600',
-    colorDot: 'bg-cyan-500',
-    desc: 'ML 模型预测 P10/P50/P90 区间',
-  },
-  {
-    id: 'cost',
-    label: '成本结构拆解',
-    icon: BarChart3,
-    color: 'amber',
-    colorClass: 'bg-amber-50 border-amber-300 text-amber-600',
-    textClass: 'text-amber-600',
-    colorDot: 'bg-amber-500',
-    desc: '拆解材料/人工/制造/利润占比',
-  },
-  {
-    id: 'deviation',
-    label: '偏离度综合打分',
-    icon: TrendingDown,
-    color: 'rose',
-    colorClass: 'bg-rose-50 border-rose-300 text-rose-600',
-    textClass: 'text-rose-600',
-    colorDot: 'bg-rose-500',
-    desc: '多维度加权计算综合偏离度',
-  },
-  {
-    id: 'llm',
-    label: 'LLM 决策路由',
-    icon: Brain,
-    color: 'emerald',
-    colorClass: 'bg-emerald-50 border-emerald-300 text-emerald-600',
-    textClass: 'text-emerald-600',
-    colorDot: 'bg-emerald-500',
-    desc: 'Kimi K2.5 ReAct 工具调用循环',
-  },
+const PHASE1_NODES = [
+  { id: 'material', label: '物料构造', icon: Database, color: '#6366f1', desc: '结构化物料基础信息' },
+  { id: 'baseline', label: '并行体检', icon: Activity, color: '#8b5cf6', desc: '价格预测+成本拆解+相似检索' },
+  { id: 'scoring', label: '偏离度评分', icon: TrendingDown, color: '#f59e0b', desc: '两层串联加权综合打分' },
+  { id: 'triage', label: '智能分流', icon: GitBranch, color: '#10b981', desc: '偏离<20自动通过 / ≥20进入诊断' },
 ]
 
-// 演示用的报价数据
+const PHASE2_NODES = [
+  { id: 'hypothesis', label: '生成假设', icon: Brain, color: '#ec4899', desc: 'LLM分析偏离模式生成根因假设' },
+  { id: 'investigate', label: '调查验证', icon: Search, color: '#06b6d4', desc: '调用诊断工具收集证据' },
+  { id: 'conclude', label: '诊断结论', icon: Lightbulb, color: '#f97316', desc: '确认根因+生成应对方案' },
+  { id: 'human', label: '人工确认', icon: Shield, color: '#3b82f6', desc: 'Human-in-the-loop 审核决策' },
+]
+
+const DIAG_TOOLS = [
+  { icon: User, label: '供应商画像', color: '#6366f1' },
+  { icon: BarChart3, label: '同行对比', color: '#8b5cf6' },
+  { icon: Globe, label: '市场行情', color: '#06b6d4' },
+  { icon: Clock, label: '库存紧急度', color: '#f59e0b' },
+  { icon: Search, label: '替代供应商', color: '#10b981' },
+  { icon: Wrench, label: '成本异常分析', color: '#f97316' },
+]
+
 const DEMO_QUOTE = {
   material_id: 'DEMO-001',
   material_name: 'ABS注塑支架',
@@ -105,519 +46,228 @@ const DEMO_QUOTE = {
   description: '医疗设备用精密塑料支架',
 }
 
-// 每个节点的模拟结果
-const NODE_RESULTS = [
-  { output: '物料ID=DEMO-001, category=塑料外壳', duration: 12 },
-  { output: 'Top-5相似物料检索完成，相似度均>0.7', duration: 340 },
-  { output: 'P10=¥1.74 / P50=¥1.92 / P90=¥2.28', duration: 890 },
-  { output: '成本偏离=10.0分, 基准=plastic_injection', duration: 420 },
-  { output: '综合偏离度=183.7分 (紧急)', duration: 180 },
-  { output: 'Kimi LLM 调用 tool_generate_solutions ×1', duration: 3495 },
-]
-
-const SOLUTIONS_DEMO: Solution[] = [
-  {
-    id: 'sol-1',
-    title: '议价重谈',
-    description: '基于偏离度分析，建议与供应商重新议价，目标价位¥2.0以下',
-    confidence: 0.92,
-    estimated_savings: '¥32.5万/年',
-    action: '联系供应商发起二次议价',
-  },
-  {
-    id: 'sol-2',
-    title: '备选供应商询价',
-    description: '启动3家备选供应商的快速询价流程，获取市场真实行情',
-    confidence: 0.85,
-    estimated_savings: '¥28万/年',
-    action: '发起RFQ流程',
-  },
-  {
-    id: 'sol-3',
-    title: '规格优化评审',
-    description: '联合工程团队评估规格优化空间，降低工艺复杂度以压低成本',
-    confidence: 0.71,
-    estimated_savings: '¥15万/年',
-    action: '安排工程评审会议',
-  },
-]
-
 export default function Demo() {
   const navigate = useNavigate()
   const [phase, setPhase] = useState<'intro' | 'running' | 'done'>('intro')
-  const [currentNode, setCurrentNode] = useState(-1)
-  const [completedNodes, setCompletedNodes] = useState<Set<number>>(new Set())
+  const [p1Node, setP1Node] = useState(-1)
+  const [p2Node, setP2Node] = useState(-1)
+  const [investigating, setInvestigating] = useState(false)
   const [result, setResult] = useState<Quote | null>(null)
-  const [selectedSol, setSelectedSol] = useState<string | null>(null)
-  const [liveResults, setLiveResults] = useState<{ output: string; duration: number }[]>([])
   const intervalRef = useRef<NodeJS.Timeout | null>(null)
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const isMountedRef = useRef(true)
 
-  // 组件挂载状态管理
-  useEffect(() => {
-    isMountedRef.current = true
-    return () => {
-      isMountedRef.current = false
-    }
-  }, [])
+  useEffect(() => { return () => { if (intervalRef.current) clearInterval(intervalRef.current) } }, [])
 
-  // 清理所有定时器
-  const cleanupTimers = useCallback(() => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current)
-      intervalRef.current = null
-    }
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current)
-      timeoutRef.current = null
-    }
-  }, [])
-
-  const reset = useCallback(() => {
-    cleanupTimers()
-    setPhase('intro')
-    setCurrentNode(-1)
-    setCompletedNodes(new Set())
-    setResult(null)
-    setLiveResults([])
-    setSelectedSol(null)
-  }, [cleanupTimers])
-
-  const runDemo = useCallback(() => {
-    // 先清理之前的定时器
-    cleanupTimers()
+  const startDemo = async () => {
     setPhase('running')
-    setCurrentNode(0)
-    setCompletedNodes(new Set())
-    setLiveResults([])
-    setResult(null)
+    setP1Node(-1); setP2Node(-1); setInvestigating(false)
 
-    // 动画模拟节点执行
-    let step = 0
-    intervalRef.current = setInterval(() => {
-      if (!isMountedRef.current) {
-        cleanupTimers()
-        return
-      }
-      if (step < DEMO_NODES.length) {
-        setCurrentNode(step)
-        setLiveResults(prev => [...prev, NODE_RESULTS[step]])
-        setCompletedNodes(prev => new Set([...prev, step]))
-        step++
-      } else {
-        clearInterval(intervalRef.current!)
-        intervalRef.current = null
-      }
-    }, 800)
-
-    // 同时调用真实 API（添加错误处理，防止 API 失败导致界面崩溃）
-    analyzeQuote(DEMO_QUOTE)
-      .then(res => {
-        if (isMountedRef.current) {
-          setResult(res)
-        }
-      })
-      .catch(e => {
-        console.error('Demo API error:', e)
-        // API 失败不影响演示动画，使用本地模拟结果
-      })
-
-    // 等动画跑完再切到完成
-    timeoutRef.current = setTimeout(() => {
-      if (isMountedRef.current) {
-        setPhase('done')
-        setCompletedNodes(new Set(DEMO_NODES.map((_, i) => i)))
-        setCurrentNode(DEMO_NODES.length - 1)
-      }
-    }, DEMO_NODES.length * 800 + 1000)
-  }, [cleanupTimers])
-
-  useEffect(() => {
-    return () => {
-      cleanupTimers()
+    // Phase 1 animation: 4 nodes × 800ms
+    for (let i = 0; i < PHASE1_NODES.length; i++) {
+      await sleep(800); setP1Node(i)
     }
-  }, [cleanupTimers])
 
-  const isNodeActive = (idx: number) => {
-    if (phase === 'intro') return false
-    if (phase === 'running') return currentNode === idx
-    return true
+    // Fire API call (don't wait for it to start Phase 2 animation)
+    const apiPromise = analyzeQuote(DEMO_QUOTE).catch(() => null)
+
+    // Phase 2 animation runs in parallel with API call
+    for (let i = 0; i < PHASE2_NODES.length; i++) {
+      await sleep(i === 1 ? 1500 : 800)
+      setP2Node(i)
+      if (i === 1) {
+        setInvestigating(true)
+        await sleep(1500)
+        setInvestigating(false)
+      }
+    }
+
+    // Wait for API result
+    const quoteResult = await apiPromise
+    setResult(quoteResult)
+    setPhase('done')
   }
 
-  const isNodeDone = (idx: number) => {
-    return completedNodes.has(idx)
-  }
-
-  const isNodeRunning = (idx: number) => {
-    return phase === 'running' && currentNode === idx
-  }
-
-  const getNodeOpacity = (idx: number) => {
-    if (phase === 'intro') return 'opacity-30'
-    if (isNodeDone(idx)) return 'opacity-100'
-    if (isNodeActive(idx)) return 'opacity-100'
-    return 'opacity-30'
-  }
-
-  const totalDuration = liveResults.reduce((s, r) => s + (r?.duration || 0), 0)
+  const reset = () => { setPhase('intro'); setP1Node(-1); setP2Node(-1); setResult(null) }
 
   return (
-    <div className="h-full overflow-auto bg-gradient-to-br from-slate-50 to-blue-50">
+    <div className="max-w-6xl mx-auto px-4 py-6 space-y-8">
       {/* Hero */}
-      <div className="relative overflow-hidden bg-gradient-to-r from-primary/5 via-accent/5 to-primary/5 border-b border-gray-200">
-        <div className="max-w-6xl mx-auto px-6 py-12 lg:py-16">
-          <div className="flex items-start justify-between gap-8">
-            <div className="flex-1">
-              <div className="flex items-center gap-2 mb-4">
-                <div className="flex items-center gap-1 px-3 py-1 bg-primary/10 text-primary text-xs font-medium rounded-full">
-                  <Sparkles className="w-3 h-3" />
-                  Live Demo
-                </div>
-                <span className="text-xs text-gray-400">供销计划异常 Agent · 九安医疗</span>
-              </div>
-              <h1 className="text-3xl lg:text-4xl font-bold text-gray-900 mb-3">
-                AI Agent 如何发现
-                <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-accent"> 报价异常</span>
-              </h1>
-              <p className="text-gray-600 text-base lg:text-lg max-w-2xl leading-relaxed">
-                点击下方按钮，实时观看 AI Agent 如何串联 ML 模型与 LLM，
-                自动识别报价异常并生成应对方案。全程透明可追溯。
-              </p>
-
-              {/* 演示报价卡片 */}
-              <div className="mt-6 inline-flex items-center gap-4 p-4 bg-white/80 border border-gray-200 rounded-xl shadow-sm">
-                <div className="text-center">
-                  <div className="text-xs text-gray-500 mb-1">供应商报价</div>
-                  <div className="text-2xl font-mono font-bold text-gray-900">¥8.50</div>
-                </div>
-                <div className="w-px h-10 bg-gray-200"></div>
-                <div className="text-center">
-                  <div className="text-xs text-gray-500 mb-1">物料</div>
-                  <div className="text-base font-medium text-gray-700">ABS注塑支架</div>
-                </div>
-                <div className="w-px h-10 bg-gray-200"></div>
-                <div className="text-center">
-                  <div className="text-xs text-gray-500 mb-1">供应商</div>
-                  <div className="text-base font-medium text-gray-700">深圳塑料厂</div>
-                </div>
-                <div className="w-px h-10 bg-gray-200"></div>
-                <div className="text-center">
-                  <div className="text-xs text-gray-500 mb-1">数量</div>
-                  <div className="text-base font-medium text-gray-700">50,000件</div>
-                </div>
-              </div>
-            </div>
-
-            {/* 右侧架构图预览 */}
-            <div className="hidden lg:block">
-              <div className="w-64 p-4 bg-white/80 border border-gray-200 rounded-xl shadow-sm">
-                <div className="text-xs text-gray-500 mb-3 font-medium">Agent 架构</div>
-                <div className="space-y-2">
-                  {[
-                    { label: 'ML 工具链', sub: '4 个推理节点', color: 'bg-blue-100 text-blue-600' },
-                    { label: 'Kimi K2.5 LLM', sub: 'ReAct 工具调用', color: 'bg-emerald-100 text-emerald-600' },
-                    { label: '人工干预', sub: '审批 + 决策', color: 'bg-amber-100 text-amber-600' },
-                  ].map((item, i) => (
-                    <div key={i} className={`px-3 py-2 rounded-lg text-sm ${item.color} flex items-center justify-between`}>
-                      <span className="font-medium">{item.label}</span>
-                      <span className="text-xs opacity-70">{item.sub}</span>
-                    </div>
-                  ))}
-                  <div className="flex items-center gap-1 mt-2 text-xs text-gray-400">
-                    <GitBranch className="w-3 h-3" />
-                    <span>LangGraph 状态机驱动</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+      <div className="text-center space-y-3">
+        <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          供销计划异常协调 Agent
+        </h1>
+        <p className="text-gray-500">两阶段+三条路径架构 · 层次贝叶斯价格预测 · AI自主诊断</p>
       </div>
 
-      {/* Pipeline可视化 */}
-      <div className="max-w-6xl mx-auto px-6 py-8">
-        <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-semibold text-gray-900">执行流程</h2>
-          {phase !== 'intro' && (
-            <div className="flex items-center gap-3">
-              {phase === 'running' && (
-                <div className="flex items-center gap-2 text-sm text-primary">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>执行中...</span>
-                </div>
-              )}
-              <span className="text-sm text-gray-500">
-                {completedNodes.size}/{DEMO_NODES.length} 节点
-                {totalDuration > 0 && ` · ${totalDuration}ms`}
-              </span>
-              <button
-                onClick={reset}
-                className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 transition-colors"
-              >
-                <RotateCcw className="w-4 h-4" />
-                重置
-              </button>
-            </div>
-          )}
+      {/* Demo Card */}
+      <div className="bg-white rounded-xl border p-6 max-w-lg mx-auto">
+        <h3 className="font-semibold mb-3">演示报价</h3>
+        <div className="grid grid-cols-2 gap-2 text-sm">
+          <span className="text-gray-400">物料</span><span>{DEMO_QUOTE.material_name}</span>
+          <span className="text-gray-400">供应商</span><span>{DEMO_QUOTE.supplier_name}</span>
+          <span className="text-gray-400">报价</span><span className="font-bold">¥{DEMO_QUOTE.supplier_quote}</span>
+          <span className="text-gray-400">数量</span><span>{DEMO_QUOTE.quantity.toLocaleString()}件</span>
         </div>
-
-        {/* 流程节点 */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-8">
-          {DEMO_NODES.map((node, idx) => {
-            const Icon = node.icon
-            const active = isNodeActive(idx)
-            const done = isNodeDone(idx)
-            const running = isNodeRunning(idx)
-            const nodeResult = liveResults[idx]
-
-            return (
-              <div key={node.id} className="relative">
-                <div
-                  className={`relative p-4 rounded-xl border-2 transition-all duration-500 bg-white ${
-                    done ? `${node.colorClass} border-current shadow-sm` :
-                    running ? `${node.colorClass} border-current shadow-lg scale-[1.03] ring-4 ring-primary/20` :
-                    `${node.colorClass} border-current opacity-40`
-                  }`}
-                >
-                  {/* 节点图标 */}
-                  <div className="flex items-center justify-between mb-3">
-                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                      done || running ? 'bg-white/30' : 'bg-gray-100'
-                    }`}>
-                      <Icon className={`w-5 h-5 ${done || running ? '' : 'text-gray-400'}`} />
-                    </div>
-                    {done && !running && (
-                      <CheckCircle className="w-5 h-5 text-current" />
-                    )}
-                    {running && (
-                      <div className="w-5 h-5 rounded-full bg-white/50 flex items-center justify-center">
-                        <div className="w-3 h-3 rounded-full bg-current animate-pulse" />
-                      </div>
-                    )}
-                  </div>
-
-                  {/* 标签 */}
-                  <div className={`text-sm font-semibold mb-1 ${done || running ? '' : 'text-gray-400'}`}>
-                    {node.label}
-                  </div>
-                  <div className={`text-xs leading-relaxed ${done || running ? 'opacity-80' : 'opacity-50'}`}>
-                    {node.desc}
-                  </div>
-
-                  {/* 耗时 */}
-                  {nodeResult && (
-                    <div className="mt-2 flex items-center gap-1 text-xs opacity-70">
-                      <Clock className="w-3 h-3" />
-                      {nodeResult.duration}ms
-                    </div>
-                  )}
-                </div>
-
-                {/* 连接线（最后一个不显示） */}
-                {idx < DEMO_NODES.length - 1 && (
-                  <div className="hidden lg:block absolute top-1/2 -right-3 transform -translate-y-1/2 z-10">
-                    <ChevronRight className="w-6 h-6 text-gray-300" />
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
-
-        {/* 节点详细输出 */}
-        {liveResults.filter(Boolean).length > 0 && (
-          <div className="mb-8 p-4 bg-white border border-gray-200 rounded-xl shadow-sm">
-            <div className="text-sm font-medium text-gray-700 mb-3">执行详情</div>
-            <div className="space-y-2">
-              {liveResults.filter(Boolean).map((r, idx) => {
-                if (!r) return null
-                const node = DEMO_NODES[idx]
-                if (!node) return null
-                const Icon = node.icon
-                return (
-                  <div key={idx} className="flex items-start gap-3 p-3 bg-gray-50 rounded-lg">
-                    <Icon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${node.textClass}`} />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium text-gray-900">{node.label}</span>
-                        <span className="text-xs text-gray-400 font-mono">{r.duration}ms</span>
-                      </div>
-                      <div className="text-sm text-accent font-mono mt-0.5 truncate">{r.output}</div>
-                    </div>
-                    <CheckCircle className="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5" />
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* 控制按钮 */}
-        <div className="flex items-center justify-center mb-10">
+        <div className="flex gap-2 mt-4">
           {phase === 'intro' && (
-            <button
-              onClick={runDemo}
-              className="group flex items-center gap-3 px-8 py-4 bg-gradient-to-r from-primary to-accent text-white rounded-2xl font-semibold text-lg shadow-lg shadow-primary/25 hover:shadow-xl hover:scale-[1.02] transition-all"
-            >
-              <Play className="w-5 h-5" />
-              启动演示
-              <ChevronRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+            <button onClick={startDemo} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+              <Play size={16} /> 开始演示
             </button>
           )}
           {phase === 'running' && (
-            <div className="flex items-center gap-3 text-primary">
-              <Loader2 className="w-6 h-6 animate-spin" />
-              <span className="text-lg font-medium">Agent 运行中...</span>
-            </div>
-          )}
-          {phase === 'done' && (
-            <button
-              onClick={runDemo}
-              className="flex items-center gap-2 px-6 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-all"
-            >
-              <RefreshCw className="w-4 h-4" />
-              再跑一次
+            <button disabled className="flex items-center gap-2 px-4 py-2 bg-gray-300 text-gray-500 rounded-lg">
+              <Activity size={16} className="animate-spin" /> 运行中...
             </button>
           )}
+          {phase === 'done' && (
+            <button onClick={reset} className="flex items-center gap-2 px-4 py-2 border rounded-lg hover:bg-gray-50">
+              <RotateCcw size={16} /> 重新演示
+            </button>
+          )}
+          <button onClick={() => navigate('/quotes/new')} className="flex items-center gap-2 px-4 py-2 border rounded-lg hover:bg-gray-50">
+            体验完整系统 <ArrowRight size={16} />
+          </button>
         </div>
+      </div>
 
-        {/* 最终结果 */}
-        {phase === 'done' && (
-          <div className="space-y-6 animate-fade-in">
-            {/* 关键指标 */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
-                <div className="text-xs text-gray-500 mb-2">综合偏离度</div>
-                <div className="text-3xl font-bold text-rose-500">183.7</div>
-                <div className="text-sm text-rose-600 mt-1 font-medium">紧急</div>
-              </div>
-              <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
-                <div className="text-xs text-gray-500 mb-2">AI预测区间</div>
-                <div className="text-lg font-mono text-accent">¥1.74 ~ ¥2.28</div>
-                <div className="text-sm text-gray-600 mt-1">P50=¥1.92</div>
-              </div>
-              <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
-                <div className="text-xs text-gray-500 mb-2">偏离倍数</div>
-                <div className="text-3xl font-bold text-danger">4.4×</div>
-                <div className="text-sm text-gray-500 mt-1">供应商报价 / 预测中位</div>
-              </div>
-              <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
-                <div className="text-xs text-gray-500 mb-2">生成方案</div>
-                <div className="text-3xl font-bold text-emerald-600">3</div>
-                <div className="text-sm text-gray-500 mt-1">AI建议方案</div>
+      {(phase === 'running' || phase === 'done') && (
+        <>
+          {/* Phase 1 */}
+          <PhaseSection
+            title="第一阶段：自动化体检（确定性，无LLM）"
+            subtitle="并行执行三项体检 → 两层打分 → 智能分流"
+            color="#6366f1"
+            nodes={PHASE1_NODES}
+            activeNode={p1Node}
+            done={phase === 'done'}
+          />
+
+          {/* Triage result */}
+          {p1Node >= 3 && (
+            <div className="flex justify-center">
+              <div className={`px-4 py-2 rounded-full text-sm font-medium ${
+                (result?.phase ?? 'diagnosis') === 'fast_pass'
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-yellow-100 text-yellow-700'
+              }`}>
+                {result?.phase === 'fast_pass'
+                  ? `↳ 偏离度 ${result.deviation_score}分 → 快速通道（自动通过）`
+                  : `↳ 偏离度 ${result?.deviation_score ?? '?'}分 → 进入Agent诊断`
+                }
               </div>
             </div>
+          )}
 
-            {/* 价格对比 */}
-            <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
-              <h3 className="text-base font-semibold text-gray-900 mb-4">价格对比</h3>
-              <div className="flex items-end gap-8">
-                <div className="text-center">
-                  <div className="text-xs text-gray-500 mb-1">供应商报价</div>
-                  <div className="text-3xl font-mono font-bold text-gray-900">¥8.50</div>
-                </div>
-                <div className="text-3xl text-gray-300 pb-1">→</div>
-                <div className="text-center">
-                  <div className="text-xs text-gray-500 mb-1">AI预测区间</div>
-                  <div className="text-3xl font-mono font-bold text-accent">¥1.74 ~ ¥2.28</div>
-                </div>
-                <div className="text-3xl text-gray-300 pb-1">→</div>
-                <div className="text-center">
-                  <div className="text-xs text-gray-500 mb-1">偏离倍数</div>
-                  <div className="text-3xl font-mono font-bold text-rose-500">4.4×</div>
-                </div>
-              </div>
-            </div>
+          {/* Phase 2 — Phase 1 完成后始终展示 */}
+          {p1Node >= 3 && (
+            <PhaseSection
+              title="第二阶段：Agent诊断（LLM自主决策）"
+              subtitle="假设-验证循环 → 7个诊断工具 → 根因定位"
+              color="#f59e0b"
+              nodes={PHASE2_NODES}
+              activeNode={p2Node}
+              done={phase === 'done'}
+            />
+          )}
 
-            {/* 方案列表 */}
-            <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
-              <div className="flex items-center justify-between mb-5">
-                <div>
-                  <h3 className="text-base font-semibold text-gray-900">AI 建议方案</h3>
-                  <p className="text-xs text-gray-500 mt-1">由 Kimi K2.5 基于偏离分析生成</p>
-                </div>
-                <div className="flex items-center gap-2 px-3 py-1 bg-emerald-50 text-emerald-600 text-xs font-medium rounded-full">
-                  <Brain className="w-3 h-3" />
-                  LLM 生成
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                {SOLUTIONS_DEMO.map((sol, idx) => (
-                  <div
-                    key={sol.id}
-                    onClick={() => setSelectedSol(selectedSol === sol.id ? null : sol.id)}
-                    className={`p-5 rounded-xl border-2 cursor-pointer transition-all ${
-                      selectedSol === sol.id
-                        ? 'border-primary bg-primary/5 shadow-md'
-                        : 'border-gray-100 hover:border-gray-300 hover:bg-gray-50'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center font-bold text-sm">
-                          {idx + 1}
-                        </div>
-                        <div>
-                          <div className="font-semibold text-gray-900">{sol.title}</div>
-                          <div className="text-xs text-gray-400 mt-0.5">
-                            置信度 {sol.confidence * 100}% · {sol.action}
-                          </div>
-                        </div>
-                      </div>
-                      {selectedSol === sol.id && <CheckCircle className="w-5 h-5 text-primary" />}
-                    </div>
-                    <p className="text-sm text-gray-600 leading-relaxed">{sol.description}</p>
-                    <div className="mt-3 flex items-center gap-2">
-                      <TrendingDown className="w-4 h-4 text-emerald-500" />
-                      <span className="text-sm font-semibold text-emerald-600">
-                        预计节省: {sol.estimated_savings}
-                      </span>
-                    </div>
+          {/* Diagnostic tools */}
+          {investigating && (
+            <div className="bg-white rounded-xl border p-4">
+              <h3 className="text-sm font-medium mb-3 flex items-center gap-2"><Search size={16} /> Agent 选择调用的诊断工具</h3>
+              <div className="grid grid-cols-6 gap-2">
+                {DIAG_TOOLS.map((t, i) => (
+                  <div key={i} className="text-center p-2 rounded-lg animate-pulse" style={{ background: t.color + '15' }}>
+                    <t.icon size={20} style={{ color: t.color }} className="mx-auto mb-1" />
+                    <div className="text-xs text-gray-600">{t.label}</div>
                   </div>
                 ))}
               </div>
             </div>
+          )}
 
-            {/* 决策按钮 */}
-            <div className="flex items-center justify-center gap-4 pb-8">
-              <button
-                onClick={() => navigate('/quotes/new')}
-                className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-primary to-accent text-white rounded-xl font-medium shadow-lg hover:shadow-xl transition-all"
-              >
-                <Zap className="w-4 h-4" />
-                体验完整系统
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
+          {/* Results */}
+          {phase === 'done' && result && (
+            <div className="bg-white rounded-xl border p-6">
+              <h3 className="font-bold text-lg mb-4 flex items-center gap-2">
+                <Sparkles size={20} className="text-yellow-500" /> 分析结果
+              </h3>
+              <div className="grid grid-cols-4 gap-4 mb-4">
+                <Stat label="偏离度" value={`${result.deviation_score}分`} color={result.severity_color} />
+                <Stat label="严重级别" value={result.severity_level} color={result.severity_color} />
+                <Stat label="贝叶斯P50" value={`¥${result.ai_prediction_mid ?? '?'}`} color="#6366f1" />
+                <Stat label="阶段" value={result.phase === 'fast_pass' ? '快速通道' : result.phase} color="#10b981" />
+              </div>
 
-        {/* 技术说明 */}
-        {phase === 'done' && (
-          <div className="mt-6 p-6 bg-slate-50 border border-slate-200 rounded-xl">
-            <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <MessageSquare className="w-4 h-4 text-primary" />
-              端到端链路说明
-            </h4>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 text-sm text-gray-600">
-              <div>
-                <div className="font-medium text-gray-900 mb-1">ML 工具链 (LangGraph)</div>
-                <p>相似物料向量检索 → 贝叶斯价格区间预测 → 成本结构分析 → 偏离度综合打分，全部在本地执行。</p>
-              </div>
-              <div>
-                <div className="font-medium text-gray-900 mb-1">LLM ReAct 循环 (Kimi K2.5)</div>
-                <p>Kimi 根据偏离度判断是否需要工具调用，本例触发了 tool_generate_solutions，生成 3 个可解释应对方案。</p>
-              </div>
-              <div>
-                <div className="font-medium text-gray-900 mb-1">全程透明可追溯</div>
-                <p>每个节点的输入、输出、置信度、耗时均记录在 execution_trace 中，支持播放/暂停/回退的人机交互。</p>
-              </div>
+              {result.diagnosis_conclusion && (
+                <div className="bg-purple-50 rounded-lg p-4 mb-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Brain size={16} className="text-purple-600" />
+                    <span className="font-medium text-sm">AI 诊断结论</span>
+                    <span className="text-xs text-purple-400">置信度 {(result.diagnosis_conclusion.confidence * 100).toFixed(0)}%</span>
+                  </div>
+                  <p className="text-sm text-gray-700">{result.diagnosis_conclusion.root_cause}</p>
+                </div>
+              )}
+
+              {result.solutions && result.solutions.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-sm font-medium">应对方案</h4>
+                  {result.solutions.slice(0, 3).map((s, i) => (
+                    <div key={i} className="flex items-center gap-3 p-2 rounded-lg bg-gray-50 text-sm">
+                      <CheckCircle size={16} className="text-green-500 shrink-0" />
+                      <span className="flex-1">{s.title}</span>
+                      <span className="text-xs text-gray-400">{(s.confidence * 100).toFixed(0)}%</span>
+                      <span className="text-xs text-gray-400">{s.estimated_savings}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          )}
+        </>
+      )}
+
+      {/* Architecture footer */}
+      <div className="text-center text-xs text-gray-400 space-y-1">
+        <p>层次贝叶斯价格预测 · TF-IDF 向量相似检索 · DuckDuckGo 联网行情 · Kimi K2.5 诊断推理</p>
+        <p>偏离&lt;20 自动通过 · 20-60 标准诊断 · ≥60 紧急升级 · Human-in-the-Loop</p>
       </div>
     </div>
   )
 }
+
+function PhaseSection({ title, subtitle, color, nodes, activeNode, done }: {
+  title: string; subtitle: string; color: string; nodes: any[]; activeNode: number; done: boolean
+}) {
+  return (
+    <div className="bg-white rounded-xl border p-4">
+      <h3 className="font-semibold text-sm mb-1" style={{ color }}>{title}</h3>
+      <p className="text-xs text-gray-400 mb-4">{subtitle}</p>
+      <div className="flex items-center gap-2">
+        {nodes.map((node, i) => (
+          <div key={node.id} className="flex items-center gap-2 flex-1">
+            <div className={`flex-1 text-center p-3 rounded-lg border transition-all duration-300 ${
+              done || i <= activeNode ? 'border-' : 'border-gray-100 opacity-30'
+            }`} style={{ borderColor: done || i <= activeNode ? node.color : undefined }}>
+              <node.icon size={20} style={{ color: node.color }} className="mx-auto mb-1" />
+              <div className="text-xs font-medium">{node.label}</div>
+              <div className="text-xs text-gray-400 mt-0.5">{node.desc}</div>
+              {(done || i <= activeNode) && <CheckCircle size={14} className="mx-auto mt-1" style={{ color: node.color }} />}
+            </div>
+            {i < nodes.length - 1 && <ArrowRight size={14} className="text-gray-300 shrink-0" />}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function Stat({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <div className="text-center">
+      <div className="text-2xl font-bold" style={{ color }}>{value}</div>
+      <div className="text-xs text-gray-400">{label}</div>
+    </div>
+  )
+}
+
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)) }
