@@ -891,6 +891,15 @@ class MarketPriceLookup(Tool):
             # 写入 DB 缓存
             if llm_result.get('available'):
                 self._save_to_db(material_category, material_type, llm_result)
+            # 联网返回空价格时回退到 DB 缓存
+            data = llm_result.get('result', {})
+            if (data.get('price_low') in (None, 0) or data.get('price_high') in (None, 0)) and db_result:
+                cached = db_result.get('result', {})
+                data['price_low'] = cached.get('price_low') or data.get('price_low')
+                data['price_high'] = cached.get('price_high') or data.get('price_high')
+                data['source'] = cached.get('source', 'DB缓存')
+                data['note'] = (data.get('note', '') + ' | 联网无有效价格，回退缓存').strip(' |')
+                llm_result['confidence'] = max(llm_result['confidence'], db_result.get('confidence', 0.45))
             return llm_result
 
         # LLM 不可用时返回 DB 数据（即使不新鲜也比没有好）
@@ -964,13 +973,17 @@ class MarketPriceLookup(Tool):
                 content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
             data = _json.loads(content)
 
+            price_low_val = data.get("price_low", 0)
+            price_high_val = data.get("price_high", 0)
+
+            # 价格为空时填 0，由 execute 层做 DB 回退
             return {
                 "result": {
                     "available": True,
                     "category": category,
                     "material_type": material_type or "全部",
-                    "price_low": data.get("price_low", 0),
-                    "price_high": data.get("price_high", 0),
+                    "price_low": price_low_val,
+                    "price_high": price_high_val,
                     "unit": data.get("unit", "元/件"),
                     "trend": data.get("trend", "未知"),
                     "trend_detail": data.get("trend_detail", ""),
@@ -2037,8 +2050,9 @@ class UrgencyChecker(Tool):
 
     def execute(self, material_id: str, material_name: str = None,
                 **kwargs) -> Dict[str, Any]:
-        # 从 inventory 表查询
-        inv = self._query_inventory(material_id)
+        # 从 inventory 表查询（多级回退：ID → 名称 → 品类）
+        inv = self._query_inventory(material_id, material_name,
+                                     kwargs.get("category", ""))
 
         if inv:
             days = inv["days_remaining"]
@@ -2093,16 +2107,41 @@ class UrgencyChecker(Tool):
             ),
         }
 
-    def _query_inventory(self, material_id: str) -> Optional[Dict]:
+    def _query_inventory(self, material_id: str, material_name: str = "",
+                           category: str = "") -> Optional[Dict]:
         try:
             from app.db.database import get_connection
             conn = get_connection()
             try:
+                # 1. 精确匹配 ID
                 row = conn.execute(
-                    """SELECT * FROM inventory WHERE material_id = ?
-                       ORDER BY updated_at DESC LIMIT 1""",
+                    "SELECT * FROM inventory WHERE material_id = ? LIMIT 1",
                     (material_id,),
                 ).fetchone()
+                # 2. 按名称关键词匹配
+                if not row and material_name:
+                    keywords = material_name.replace('-', ' ').replace('_', ' ').split()[:3]
+                    for kw in keywords:
+                        if len(kw) >= 2:
+                            row = conn.execute(
+                                "SELECT * FROM inventory WHERE material_name LIKE ? LIMIT 1",
+                                (f"%{kw}%",),
+                            ).fetchone()
+                            if row: break
+                # 3. ID作为名称关键字再试（LLM可能用name当id传）
+                if not row:
+                    kw = material_id.replace('-', ' ').replace('_', ' ').split()[0]
+                    if len(kw) >= 2:
+                        row = conn.execute(
+                            "SELECT * FROM inventory WHERE material_name LIKE ? LIMIT 1",
+                            (f"%{kw}%",),
+                        ).fetchone()
+                # 4. 按品类取任意一条（兜底）
+                if not row and category:
+                    row = conn.execute(
+                        "SELECT * FROM inventory WHERE category = ? LIMIT 1",
+                        (category,),
+                    ).fetchone()
                 return dict(row) if row else None
             finally:
                 conn.close()
@@ -2212,21 +2251,36 @@ class CostAnomalyAnalyzer(Tool):
                                          "https://ai-gateway.ailab.jiuan.com/v1")
         self._model = os.environ.get("KIMI_MODEL", "kimi-k2.5")
 
-    def execute(self, cost_analysis: Dict, supplier_quote: float,
-                material_category: str, **kwargs) -> Dict[str, Any]:
+    def execute(self, cost_analysis: Dict = None, supplier_quote: float = 0,
+                material_category: str = "", **kwargs) -> Dict[str, Any]:
+        # 处理可能的嵌套格式
+        if cost_analysis is None:
+            cost_analysis = {}
+        # 如果传入的是 execute 层的包装结果，解包
+        if "cost_items" not in cost_analysis and "result" in cost_analysis:
+            cost_analysis = cost_analysis.get("result", {})
         cost_items = cost_analysis.get("cost_items", [])
         if not cost_items:
             return {
-                "result": {"available": False, "message": "无成本拆解数据"},
+                "result": {"available": False, "message": "无成本拆解数据，可能尚未执行成本分析"},
                 "confidence": 0.0,
-                "reasoning": "缺少成本拆解数据，无法进行深度分析",
+                "reasoning": "缺少成本拆解数据，无法进行深度分析。请确保已调用 tool_analyze_cost_structure",
             }
 
-        # 异常项
+        # 异常项：排除纯参考值，保留有偏离信息的项
         abnormal = [c for c in cost_items
-                    if c.get("status") not in ("参考值", "在市场范围内")]
-        abnormal.sort(key=lambda x: abs(x.get("deviation_from_reasonable", 0)),
-                      reverse=True)
+                    if c.get("status") not in ("参考值",)
+                    and "参考值" not in str(c.get("status", ""))]
+        if not abnormal:
+            # 无明确异常时，选取偏离最大的项
+            abnormal = sorted(
+                [c for c in cost_items if c.get("deviation_from_reasonable")],
+                key=lambda x: abs(x.get("deviation_from_reasonable", 0)),
+                reverse=True,
+            )[:3]
+        else:
+            abnormal.sort(key=lambda x: abs(x.get("deviation_from_reasonable", 0)),
+                          reverse=True)
 
         # 提取上下文（从 kwargs 获取诊断阶段已收集的信息）
         supplier_ctx = kwargs.get("supplier_profile", {})
@@ -2611,6 +2665,7 @@ class AgentOrchestrator:
             # ===== Agent 诊断结果 =====
             "diagnosis_conclusion": diagnosis,
             "diagnosis_investigations": result.get("diagnosis_investigations", []),
+            "diagnosis_hypotheses": result.get("diagnosis_hypotheses", []),
             "decision_log": result.get("decision_log", []),
             # ===== 诊断上下文 =====
             "supplier_profile": supplier,

@@ -24,6 +24,12 @@ export interface Quote {
   supplier_name: string
   quantity: number
   quote_date?: string
+  category?: string
+  material_type?: string
+  dimensions?: string
+  processing?: string
+  precision?: string
+  description?: string
 
   // 价格预测
   ai_prediction_low: number | null
@@ -54,6 +60,7 @@ export interface Quote {
   // 诊断结果
   diagnosis_conclusion?: DiagnosisConclusion
   diagnosis_investigations: DiagnosisInvestigation[]
+  diagnosis_hypotheses: DiagnosisHypothesis[]
   decision_log: DecisionLogEntry[]
 
   // 诊断上下文
@@ -105,6 +112,17 @@ export interface CostItem {
   status: string
   data_source: string
   independently_verified: boolean
+}
+
+// ===== 诊断假设 =====
+export interface DiagnosisHypothesis {
+  hypothesis: string
+  prior_confidence: number
+  to_verify: string
+  confirmed?: boolean
+  updated_confidence?: number
+  verified_by?: string
+  conclusion?: string
 }
 
 // ===== 诊断 =====
@@ -313,4 +331,62 @@ export interface DecisionInput {
   selected_solution_id?: string
   override_reason?: string
   override_price?: number
+}
+
+// ===== Override =====
+export type OverrideType = 'price' | 'solution' | 'model_param' | 'flag'
+
+export interface OverrideRecord {
+  timestamp: string
+  override_type: OverrideType
+  override_value: any
+  override_reason: string
+  step_index: number
+  source: 'human'
+}
+
+export interface DiffEntry {
+  old: any
+  new: any
+  change?: number
+}
+
+export interface QuoteDiff {
+  deviation_score?: DiffEntry
+  severity_level?: DiffEntry
+  phase?: DiffEntry
+  ai_prediction_low?: DiffEntry
+  ai_prediction_mid?: DiffEntry
+  ai_prediction_high?: DiffEntry
+  price_deviation?: DiffEntry
+  cost_deviation?: DiffEntry
+  market_deviation?: DiffEntry
+  composite_score?: DiffEntry
+  external_deviation?: DiffEntry
+  diagnosis_conclusion?: DiffEntry
+  solutions?: DiffEntry
+}
+
+export interface QuoteHistoryItem {
+  id: string
+  original_quote_id: string
+  deviation_score: number | null
+  severity_level: string | null
+  status: string | null
+  created_at: string | null
+}
+
+// ===== ReRun params =====
+export interface ReRunParams {
+  supplier_quote?: number
+  quantity?: number
+  category?: string
+  material_type?: string
+  dimensions?: string
+  processing?: string
+  precision?: string
+  description?: string
+  alpha?: number  // 价格权重
+  beta?: number   // 成本权重
+  gamma?: number  // 市场权重
 }

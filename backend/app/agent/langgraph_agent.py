@@ -533,11 +533,17 @@ def node_execute_diagnostic_tool(state: AgentState, registry: ToolRegistry) -> A
         except (json.JSONDecodeError, TypeError):
             args = {}
 
-        # 注入诊断上下文（供 CostAnomalyAnalyzer 等工具使用）
+        # 注入诊断上下文（强制覆盖，LLM 传参不可靠）
         if tool_name == "tool_analyze_cost_anomaly":
+            args["cost_analysis"] = state.get("cost_analysis", {})
+            args["supplier_quote"] = state["quote_data"].get("supplier_quote", 0)
+            args["material_category"] = state["quote_data"].get("category", "")
             args.setdefault("supplier_profile", state.get("supplier_profile", {}))
             args.setdefault("peer_benchmark", state.get("peer_benchmark", {}))
             args.setdefault("market_context", state.get("market_context", {}))
+        if tool_name == "tool_check_urgency":
+            args["material_name"] = state["quote_data"].get("material_name", "")
+            args["category"] = state["quote_data"].get("category", "")
 
         try:
             tool = registry.get(tool_name)

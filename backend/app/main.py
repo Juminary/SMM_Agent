@@ -37,7 +37,8 @@ app.add_middleware(
 from app.db.database import init_db, get_connection
 from app.db.database import (
     get_all_quotes, get_quote_by_id, insert_quote,
-    update_quote_decision, get_quote_stats,
+    update_quote_decision, append_human_feedback,
+    append_override_record, get_quote_stats,
     get_all_materials, get_material_by_id, get_materials_by_category,
     get_all_external_refs, get_external_refs_by_category,
     get_all_benchmarks,
@@ -74,8 +75,24 @@ class DecisionInput(BaseModel):
     selected_solution_id: Optional[str] = None
 
 
+class FeedbackInput(BaseModel):
+    feedback_type: str  # agree, modify, override
+    content: str
+    reasoning: str = ""
+    step_index: int = -1
+
+
 class RerunInput(BaseModel):
     params: Dict[str, Any]  # 重跑参数
+
+
+class OverrideInput(BaseModel):
+    """Override 操作输入"""
+    override_type: str  # "price" | "solution" | "model_param" | "flag"
+    override_value: Any = None  # 具体值
+    override_reason: str = ""
+    step_index: int = -1  # 指向执行轨迹中的步骤索引，-1 表示整体
+    modified_params: Optional[Dict[str, Any]] = None  # 修改后的参数（用于触发重跑）
 
 
 # ============ API端点 ============
@@ -184,6 +201,22 @@ async def make_decision(quote_id: str, decision_input: DecisionInput):
     return quote
 
 
+@app.post("/api/quotes/{quote_id}/feedback")
+async def submit_human_feedback(quote_id: str, feedback_input: FeedbackInput):
+    """注入人工反馈（用于调试工作台）"""
+    with get_connection() as conn:
+        quote = append_human_feedback(
+            conn, quote_id,
+            feedback_type=feedback_input.feedback_type,
+            content=feedback_input.content,
+            reasoning=feedback_input.reasoning,
+            step_index=feedback_input.step_index,
+        )
+    if not quote:
+        raise HTTPException(status_code=404, detail="报价不存在")
+    return quote
+
+
 @app.get("/api/quotes/{quote_id}/trace")
 async def get_execution_trace(quote_id: str):
     """获取执行轨迹"""
@@ -243,6 +276,168 @@ async def rerun_analysis(quote_id: str, rerun_input: RerunInput):
         insert_quote(conn, result)
 
     return result
+
+
+@app.post("/api/quotes/{quote_id}/override")
+async def apply_override(quote_id: str, override_input: OverrideInput):
+    """
+    注入人工 Override（调试工作台核心功能）
+
+    Override 类型：
+    - price: 手动指定合理价格，AI 重新评估偏离度
+    - solution: 从 AI 未生成的方案中手动补充
+    - model_param: 调整打分权重 (α/β/γ)
+    - flag: 标记为 AI 误判（用于反馈迭代）
+
+    流程：写入 override 记录 → 触发重跑 → 返回 Diff 结果
+    """
+    from app.db.database import get_quote_by_id, append_override_record
+
+    with get_connection() as conn:
+        quote = get_quote_by_id(conn, quote_id)
+    if not quote:
+        raise HTTPException(status_code=404, detail="报价不存在")
+
+    override_record = {
+        "timestamp": datetime.now().isoformat(),
+        "override_type": override_input.override_type,
+        "override_value": override_input.override_value,
+        "override_reason": override_input.override_reason,
+        "step_index": override_input.step_index,
+    }
+
+    # 追加 override 记录
+    with get_connection() as conn:
+        append_override_record(conn, quote_id, override_record)
+
+    # 如果有修改参数，触发重跑
+    if override_input.modified_params and override_input.override_type == "price":
+        rerun_input = RerunInput(params=override_input.modified_params)
+        with get_connection() as conn:
+            old_quote = get_quote_by_id(conn, quote_id)
+        quote_input = {
+            'material_id': old_quote.get('material_id', ''),
+            'material_name': old_quote.get('material_name', ''),
+            'supplier_quote': override_input.modified_params.get('supplier_quote', old_quote.get('supplier_quote', 0)),
+            'supplier_name': old_quote.get('supplier_name', ''),
+            'quantity': override_input.modified_params.get('quantity', old_quote.get('quantity', 0)),
+            'quote_date': datetime.now().strftime('%Y-%m-%d'),
+            'category': override_input.modified_params.get('category', '塑料外壳'),
+            'material_type': override_input.modified_params.get('material_type', 'ABS'),
+            'dimensions': override_input.modified_params.get('dimensions', ''),
+            'processing': override_input.modified_params.get('processing', ''),
+            'precision': override_input.modified_params.get('precision', ''),
+            'description': override_input.modified_params.get('description', ''),
+        }
+        import asyncio
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(agent.process_quote, quote_input),
+                timeout=120.0
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="重跑超时")
+        result['id'] = f"{quote_id}-override-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        result['original_quote_id'] = quote_id
+        with get_connection() as conn:
+            insert_quote(conn, result)
+        return {
+            "override_record": override_record,
+            "original_quote": quote,
+            "rerun_quote": result,
+            "diff": _compute_diff(quote, result),
+        }
+
+    return {
+        "override_record": override_record,
+        "quote": quote,
+    }
+
+
+def _compute_diff(old: Dict, new: Dict) -> Dict:
+    """计算两个报价分析结果的差异"""
+    def safe(val):
+        if val is None:
+            return None
+        if isinstance(val, (int, float)):
+            return round(float(val), 4)
+        return val
+
+    diff = {}
+    compare_fields = [
+        "deviation_score", "severity_level", "phase",
+        "ai_prediction_low", "ai_prediction_mid", "ai_prediction_high",
+        "price_deviation", "cost_deviation", "market_deviation",
+        "composite_score", "external_deviation",
+    ]
+    for field in compare_fields:
+        old_val = safe(old.get(field))
+        new_val = safe(new.get(field))
+        if old_val is not None or new_val is not None:
+            diff[field] = {"old": old_val, "new": new_val}
+            if old_val is not None and new_val is not None:
+                diff[field]["change"] = round(new_val - old_val, 4)
+
+    # 比较诊断结论
+    if old.get("diagnosis_conclusion") or new.get("diagnosis_conclusion"):
+        diff["diagnosis_conclusion"] = {
+            "old": old.get("diagnosis_conclusion"),
+            "new": new.get("diagnosis_conclusion"),
+        }
+
+    # 比较方案
+    old_sols = old.get("solutions") or []
+    new_sols = new.get("solutions") or []
+    if len(old_sols) != len(new_sols) or old_sols != new_sols:
+        diff["solutions"] = {
+            "old": old_sols,
+            "new": new_sols,
+        }
+
+    return diff
+
+
+@app.get("/api/quotes/{quote_id}/compare/{compare_id}")
+async def compare_quotes(quote_id: str, compare_id: str):
+    """对比两个报价分析结果（用于 Diff View）"""
+    with get_connection() as conn:
+        original = get_quote_by_id(conn, quote_id)
+        compare_with = get_quote_by_id(conn, compare_id)
+    if not original:
+        raise HTTPException(status_code=404, detail="原始报价不存在")
+    if not compare_with:
+        raise HTTPException(status_code=404, detail="对比报价不存在")
+
+    return {
+        "original": original,
+        "compare_with": compare_with,
+        "diff": _compute_diff(original, compare_with),
+    }
+
+
+@app.get("/api/quotes/{quote_id}/history")
+async def get_quote_history(quote_id: str):
+    """获取报价的重跑/Override 历史"""
+    import re
+    pattern = rf"^{re.escape(quote_id)}(-rerun-|-override-|\-)"
+    with get_connection() as conn:
+        all_quotes = get_all_quotes(conn, limit=1000)
+
+    related = []
+    for q in all_quotes:
+        qid = q.get("id", "")
+        orig = q.get("original_quote_id", "")
+        if orig == quote_id or (qid.startswith(quote_id) and qid != quote_id):
+            related.append({
+                "id": qid,
+                "original_quote_id": orig,
+                "deviation_score": q.get("deviation_score"),
+                "severity_level": q.get("severity_level"),
+                "status": q.get("status"),
+                "created_at": q.get("created_at"),
+            })
+
+    return {"history": related}
 
 
 @app.get("/api/external-references")

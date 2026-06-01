@@ -516,6 +516,72 @@ def update_quote_decision(
     return get_quote_by_id(conn, quote_id)
 
 
+def append_human_feedback(
+    conn,
+    quote_id: str,
+    feedback_type: str,
+    content: str,
+    reasoning: str = "",
+    step_index: int = -1,
+) -> Optional[Dict[str, Any]]:
+    """将人工反馈追加到报价的 decision_log 中"""
+    row = conn.execute("SELECT decision_log FROM quotes WHERE id=?", (quote_id,)).fetchone()
+    if not row:
+        return None
+
+    log = json.loads(row["decision_log"]) if isinstance(row["decision_log"], str) and row["decision_log"] else []
+    if not isinstance(log, list):
+        log = []
+
+    log.append({
+        "timestamp": datetime.now().isoformat(),
+        "decision_point": f"human_feedback_step_{step_index}" if step_index >= 0 else "human_feedback",
+        "options_considered": [],
+        "chosen_action": feedback_type,
+        "reasoning": content[:500],
+        "confidence": 1.0,
+        "source": "human",
+        "override_reasoning": reasoning[:500] if reasoning else "",
+    })
+
+    conn.execute("UPDATE quotes SET decision_log=? WHERE id=?", (json.dumps(log, ensure_ascii=False), quote_id))
+    conn.commit()
+    return get_quote_by_id(conn, quote_id)
+
+
+def append_override_record(
+    conn,
+    quote_id: str,
+    override_record: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """将 Override 记录追加到报价的 decision_log 中，标记为 override 类型"""
+    row = conn.execute("SELECT decision_log FROM quotes WHERE id=?", (quote_id,)).fetchone()
+    if not row:
+        return None
+
+    log = json.loads(row["decision_log"]) if isinstance(row["decision_log"], str) and row["decision_log"] else []
+    if not isinstance(log, list):
+        log = []
+
+    override_entry = {
+        "timestamp": override_record.get("timestamp", datetime.now().isoformat()),
+        "decision_point": f"override_step_{override_record.get('step_index', -1)}",
+        "options_considered": [],
+        "chosen_action": f"override_{override_record.get('override_type', 'unknown')}",
+        "reasoning": override_record.get("override_reason", "")[:500],
+        "confidence": 1.0,
+        "source": "human",
+        "override_type": override_record.get("override_type"),
+        "override_value": override_record.get("override_value"),
+        "is_override": True,
+    }
+    log.append(override_entry)
+
+    conn.execute("UPDATE quotes SET decision_log=? WHERE id=?", (json.dumps(log, ensure_ascii=False), quote_id))
+    conn.commit()
+    return get_quote_by_id(conn, quote_id)
+
+
 # ---- External References ----
 
 def get_all_external_refs(conn) -> List[Dict[str, Any]]:
