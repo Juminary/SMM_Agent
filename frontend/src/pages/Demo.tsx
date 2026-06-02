@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Zap, Brain, Database, Search, Calculator, TrendingDown, Lightbulb,
-  Play, RotateCcw, CheckCircle, AlertTriangle, Sparkles,
+  Brain, Database, Search, TrendingDown, Lightbulb,
+  RotateCcw, CheckCircle, Sparkles,
   ArrowRight, BarChart3, GitBranch, Shield, User, Globe,
-  Wrench, Clock, Activity, ChevronRight,
+  Wrench, Clock, Activity,
 } from 'lucide-react'
 import { analyzeQuote } from '../utils/api'
 import ScenarioSelector from '../components/ScenarioSelector'

@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import {
   X, ArrowRight, TrendingUp, TrendingDown, Minus,
-  CheckCircle, AlertCircle, Loader2, BarChart3,
+  Loader2, BarChart3, CheckCircle, AlertCircle,
 } from 'lucide-react'
-import type { Quote, QuoteDiff, ReRunParams } from '../types'
+import type { Quote, ReRunParams } from '../types'
 import { rerunAnalysis } from '../utils/api'
 
 interface DiffViewProps {
@@ -16,7 +16,7 @@ interface DiffViewProps {
   rerunLoading?: boolean
 }
 
-function DiffCell({ oldVal, newVal, format = 'auto' }: { oldVal: any; newVal: any; format?: 'number' | 'text' | 'auto' }) {
+function DiffCell({ oldVal, newVal }: { oldVal: any; newVal: any }) {
   const displayOld = oldVal ?? '—'
   const displayNew = newVal ?? '—'
 
@@ -130,6 +130,9 @@ export default function DiffView({
   }
 
   const display = rerun || original
+  const scoreDelta = display.deviation_score - original.deviation_score
+  const severityChanged = display.severity_level !== original.severity_level
+  const diagnosisChanged = display.diagnosis_conclusion?.root_cause !== original.diagnosis_conclusion?.root_cause
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[100]" onClick={onClose}>
@@ -154,11 +157,31 @@ export default function DiffView({
               className="px-3 py-1.5 text-xs font-medium border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-1.5"
             >
               <Loader2 size={12} className={rerunLoading ? 'animate-spin' : ''} />
-              新看重跑
+              调整后重跑
             </button>
             <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
               <X size={18} className="text-gray-400" />
             </button>
+          </div>
+        </div>
+
+        <div className="px-6 py-3 bg-slate-50 border-b border-slate-200">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <SummaryPill
+              label="偏离度变化"
+              value={`${scoreDelta > 0 ? '+' : ''}${scoreDelta.toFixed(1)}分`}
+              tone={scoreDelta < 0 ? 'good' : scoreDelta > 0 ? 'bad' : 'neutral'}
+            />
+            <SummaryPill
+              label="严重级别"
+              value={severityChanged ? `${original.severity_level} -> ${display.severity_level}` : '无变化'}
+              tone={severityChanged ? 'warn' : 'neutral'}
+            />
+            <SummaryPill
+              label="根因结论"
+              value={diagnosisChanged ? '已变化' : '保持一致'}
+              tone={diagnosisChanged ? 'warn' : 'neutral'}
+            />
           </div>
         </div>
 
@@ -347,6 +370,30 @@ export default function DiffView({
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+function SummaryPill({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone: 'good' | 'bad' | 'warn' | 'neutral'
+}) {
+  const toneClass = {
+    good: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+    bad: 'border-red-200 bg-red-50 text-red-700',
+    warn: 'border-amber-200 bg-amber-50 text-amber-700',
+    neutral: 'border-gray-200 bg-white text-gray-700',
+  } as const
+
+  return (
+    <div className={`rounded-xl border px-3 py-2 ${toneClass[tone]}`}>
+      <div className="text-[11px] opacity-75">{label}</div>
+      <div className="text-sm font-semibold mt-0.5">{value}</div>
     </div>
   )
 }

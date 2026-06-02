@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   FileText, AlertTriangle, TrendingUp, CheckCircle,
-  Clock, ArrowRight, LayoutGrid, Plus,
-  BarChart3, GitBranch, Activity,
+  ArrowRight, Plus, GitBranch,
 } from 'lucide-react'
 import { fetchQuotes, fetchStats } from '../utils/api'
 import type { Quote, Stats } from '../types'

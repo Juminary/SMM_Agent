@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, LineChart, Line, Legend,
 } from 'recharts'
 import {
@@ -25,10 +25,14 @@ export default function Stats() {
 
   const loadData = async () => {
     try {
-      const [statsRes, quotesRes] = await Promise.all([fetchStats(), fetchQuotes({ limit: 200 })])
+      const [statsRes, quotesRes] = await Promise.all([fetchStats(), fetchQuotes({ limit: 100 })])
       setStats(statsRes)
       setQuotes(quotesRes.quotes)
-    } catch (e) { console.error(e) }
+      console.log('Stats loaded:', { stats: statsRes, quotesCount: quotesRes.quotes?.length })
+    } catch (e) {
+      console.error('Stats page load error:', e)
+      setQuotes([]) // ensure empty state on error
+    }
     finally { setLoading(false) }
   }
 
@@ -78,10 +82,6 @@ export default function Stats() {
     .slice(0, 8)
 
   // Monthly quote volume
-  const monthlyVolume = Object.entries(monthlyData)
-    .slice(-6)
-    .map(([m, v]) => ({ month: m, count: quotes.filter(q => (q.created_at || '').startsWith(m)).length }))
-
   if (loading) return (
     <div className="h-full flex items-center justify-center">
       <div className="animate-spin h-10 w-10 border-2 border-indigo-500 border-t-transparent rounded-full" />
@@ -154,9 +154,9 @@ export default function Stats() {
                 <Tooltip
                   contentStyle={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', fontSize: '12px' }}
                 />
-                <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+                <Bar dataKey="value" radius={[0, 4, 4, 0]} label={false}>
                   {severityData.map((entry, i) => (
-                    <rect key={i} fill={entry.fill} />
+                    <Cell key={i} fill={entry.fill} />
                   ))}
                 </Bar>
               </BarChart>
@@ -206,20 +206,26 @@ export default function Stats() {
         {/* Supplier anomaly rate */}
         <div className="bg-white rounded-2xl border p-4 shadow-sm">
           <h3 className="text-sm font-semibold text-gray-700 mb-3">供应商异常率排行</h3>
-          <div className="h-52">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={supplierChartData} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                <XAxis type="number" domain={[0, 100]} stroke="#94a3b8" fontSize={10} unit="%" />
-                <YAxis dataKey="name" width={60} stroke="#94a3b8" fontSize={10} />
-                <Tooltip
-                  contentStyle={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', fontSize: '12px' }}
-                  formatter={(v: number) => [`${v.toFixed(1)}%`, '异常率']}
-                />
-                <Bar dataKey="rate" fill="#f97316" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          {supplierChartData.length === 0 ? (
+            <div className="h-52 flex items-center justify-center text-sm text-gray-400">
+              暂无供应商异常数据
+            </div>
+          ) : (
+            <div className="h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={supplierChartData} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                  <XAxis type="number" stroke="#94a3b8" fontSize={10} unit="%" />
+                  <YAxis dataKey="name" type="category" width={60} stroke="#94a3b8" fontSize={10} />
+                  <Tooltip
+                    contentStyle={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', fontSize: '12px' }}
+                    formatter={(v: number) => [`${v?.toFixed(1) ?? v}%`, '异常率']}
+                  />
+                  <Bar dataKey="rate" fill="#f97316" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -43,6 +43,15 @@ export const submitDecision = async (id: string, input: DecisionInput) => {
   return data as Quote
 }
 
+export const selectQuoteSolution = async (id: string, input: {
+  selected_solution_id: string
+  selected_by: string
+  note?: string
+}) => {
+  const { data } = await api.post(`/quotes/${id}/select-solution`, input)
+  return data as Quote
+}
+
 export const fetchQuoteTrace = async (id: string) => {
   const { data } = await api.get(`/quotes/${id}/trace`)
   return data as { quote_id: string; execution_trace: any[]; total_duration_ms: number }
@@ -72,6 +81,7 @@ export const applyOverride = async (
     override_reason?: string
     step_index?: number
     modified_params?: Record<string, any>
+    feedback_context?: Record<string, any>
   }
 ) => {
   const { data } = await api.post(`/quotes/${id}/override`, override)
@@ -106,7 +116,7 @@ export const fetchQuoteHistory = async (id: string) => {
 
 // ===== Materials =====
 
-export const fetchSimilarMaterials = async (materialName: string, category: string) => {
+export const fetchSimilarMaterials = async (_materialName: string, category: string) => {
   const { data } = await api.get('/materials', { params: { category, limit: 5 } })
   return data as { total: number; materials: any[] }
 }

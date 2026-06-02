@@ -4,7 +4,6 @@ import {
   LayoutDashboard,
   FileText,
   Activity,
-  Settings,
   Plus,
   BarChart3,
   Cpu,
@@ -85,7 +84,7 @@ export default function Layout({ children }: LayoutProps) {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-hidden bg-[#f8fafc]">
+      <main className="flex-1 overflow-auto bg-[#f8fafc]">
         {children}
       </main>
     </div>

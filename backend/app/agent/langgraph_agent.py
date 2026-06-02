@@ -436,24 +436,29 @@ def node_start_diagnosis(state: AgentState, registry: ToolRegistry) -> AgentStat
             "hypothesis": "供应商系统性溢价",
             "prior_confidence": 0.6 if market_dev < 20 else 0.3,
             "to_verify": "调用 tool_get_supplier_profile 查看该供应商历史偏离趋势",
+            "conclusion": f"价格偏离 {price_dev:.0f}%，市场偏离 {market_dev:.0f}%，"
+                          f"{'供应商溢价可能性高' if market_dev < 20 else '需结合市场因素综合判断'}",
         })
     if market_dev > 15:
         hypotheses.append({
             "hypothesis": "原材料市场行情上涨",
             "prior_confidence": 0.5,
             "to_verify": "调用 tool_check_market_trend 查看原材料行情",
+            "conclusion": f"市场偏离 {market_dev:.0f}%，需核实近期原材料行情变动幅度",
         })
     if cost_dev > 20:
         hypotheses.append({
             "hypothesis": "工艺复杂度被低估或成本项异常",
             "prior_confidence": 0.4,
             "to_verify": "调用 tool_analyze_cost_anomaly 深度分析成本结构",
+            "conclusion": f"成本偏离 {cost_dev:.0f}%，可能存在成本项异常或行业基准不匹配",
         })
     if not hypotheses:
         hypotheses.append({
             "hypothesis": "数据稀疏导致误判",
             "prior_confidence": 0.3,
             "to_verify": "检查历史数据量和参考数据可用性",
+            "conclusion": "三个偏离分均低于阈值，但偏离度评分异常，怀疑样本量不足或数据质量问题",
         })
 
     state["diagnosis_hypotheses"] = hypotheses
@@ -463,6 +468,7 @@ def node_start_diagnosis(state: AgentState, registry: ToolRegistry) -> AgentStat
         f"生成 {len(hypotheses)} 个初始假设: "
         + "; ".join(h["hypothesis"] for h in hypotheses),
         (time.perf_counter() - t0) * 1000,
+        conclusion="; ".join(h.get("conclusion", h["hypothesis"]) for h in hypotheses),
     )
     return state
 
@@ -496,18 +502,23 @@ def node_agent_router(state: AgentState, registry: ToolRegistry) -> AgentState:
             reasoning=(response.get("content") or "")[:200],
             confidence=0.7,
         )
+        llm_reasoning = (response.get("content") or "")[:400]
         _append_trace(
             state, "Agent决策", "tool_call",
             f"选择调用: {', '.join(called_names)}",
             (time.perf_counter() - t0) * 1000,
-            agent_thought=(response.get("content") or "")[:300],
+            agent_thought=llm_reasoning[:300],
+            decision=", ".join(called_names),
+            conclusion=llm_reasoning[:200],
         )
     else:
+        llm_conclusion = (response.get("content") or "")[:400]
         _append_trace(
             state, "Agent决策", "diagnosis_conclusion",
-            (response.get("content") or "")[:300],
+            llm_conclusion[:300],
             (time.perf_counter() - t0) * 1000,
-            agent_thought=(response.get("content") or "")[:300],
+            agent_thought=llm_conclusion[:300],
+            conclusion=llm_conclusion[:200],
         )
 
     return state
@@ -584,6 +595,7 @@ def node_execute_diagnostic_tool(state: AgentState, registry: ToolRegistry) -> A
             tool_name=tool_name,
             tool_confidence=result.get("confidence"),
             tool_reasoning=reasoning,
+            conclusion=reasoning[:150],
         )
 
     state["messages"] = messages
@@ -711,6 +723,7 @@ def node_conclude_diagnosis(state: AgentState, registry: ToolRegistry) -> AgentS
         f"根因={dc['root_cause']}，类别={dc['cause_category']}，"
         f"置信度={dc['confidence']}",
         (time.perf_counter() - t0) * 1000,
+        conclusion=dc['root_cause'],
     )
     return state
 

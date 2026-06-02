@@ -68,7 +68,7 @@ class QuoteInput(BaseModel):
 
 
 class DecisionInput(BaseModel):
-    decision: str  # accept, reject, negotiate, escalate
+    decision: str  # accept, reject
     decision_by: str
     override_price: Optional[float] = None
     override_reason: Optional[str] = None
@@ -93,6 +93,107 @@ class OverrideInput(BaseModel):
     override_reason: str = ""
     step_index: int = -1  # 指向执行轨迹中的步骤索引，-1 表示整体
     modified_params: Optional[Dict[str, Any]] = None  # 修改后的参数（用于触发重跑）
+    feedback_context: Optional[Dict[str, Any]] = None  # 最近人工反馈（用于联动 override）
+
+
+class SolutionSelectionInput(BaseModel):
+    selected_solution_id: str
+    selected_by: str
+    note: str = ""
+
+
+def _find_latest_feedback(quote: Dict[str, Any], step_index: int = -1) -> Optional[Dict[str, Any]]:
+    """从 decision_log 中找出最近一条可复用的人工反馈"""
+    decision_log = quote.get("decision_log") or []
+    if not isinstance(decision_log, list):
+        return None
+
+    normalized_step = step_index if step_index is not None else -1
+    for entry in reversed(decision_log):
+        if entry.get("source") != "human":
+            continue
+        decision_point = entry.get("decision_point", "")
+        if not str(decision_point).startswith("human_feedback"):
+            continue
+
+        entry_step = -1
+        if "human_feedback_step_" in decision_point:
+            try:
+                entry_step = int(str(decision_point).rsplit("_", 1)[-1])
+            except ValueError:
+                entry_step = -1
+
+        if normalized_step >= 0 and entry_step not in {-1, normalized_step}:
+            continue
+
+        return {
+            "feedback_type": entry.get("chosen_action", ""),
+            "additional_info": entry.get("reasoning", ""),
+            "override_reasoning": entry.get("override_reasoning", ""),
+            "step_index": entry_step,
+            "timestamp": entry.get("timestamp"),
+        }
+
+    return None
+
+
+def _find_solution(quote: Dict[str, Any], selected_solution_id: str) -> Optional[Dict[str, Any]]:
+    for solution in quote.get("solutions") or []:
+        if solution.get("id") == selected_solution_id:
+            return solution
+    return None
+
+
+def _build_follow_up_summary(solution: Dict[str, Any], note: str = "") -> str:
+    title = solution.get("title", "当前方案")
+    action = solution.get("action", "")
+    description = solution.get("description", "")
+    text = f"已选定方案“{title}”"
+
+    if "议价" in title or "议价" in action:
+        text += "，下一步由 Agent 跟进目标价格区间、供应商反馈与下一轮报价变化。"
+    elif "询价" in title or "询价" in action:
+        text += "，下一步由 Agent 跟进二次询价结果与可替代供应商反馈。"
+    elif "工艺" in title or "工艺" in action:
+        text += "，下一步由 Agent 跟进工艺核实结果与成本结构修正。"
+    elif "升级" in title or "审批" in action:
+        text += "，下一步由 Agent 跟进升级审批意见与风险处置结论。"
+    else:
+        text += "，下一步由 Agent 跟进执行结果并等待最终通过或驳回。"
+
+    if description:
+        text += f" 当前方案说明：{description}"
+    if note:
+        text += f" 人工备注：{note}"
+
+    return text[:500]
+
+
+def _append_follow_up_trace(quote: Dict[str, Any], solution: Dict[str, Any], selected_by: str, note: str = "") -> None:
+    execution_trace = quote.get("execution_trace") or []
+    timestamp = datetime.now().isoformat()
+    solution_title = solution.get("title", "未命名方案")
+    follow_up_summary = _build_follow_up_summary(solution, note)
+
+    execution_trace.append({
+        "step": "人工选定方案",
+        "status": "completed",
+        "timestamp": timestamp,
+        "duration_ms": 0,
+        "output": f"{selected_by} 已选定方案：{solution_title}",
+        "decision": solution_title,
+        "conclusion_from_step": note[:200] if note else follow_up_summary[:200],
+    })
+    execution_trace.append({
+        "step": "Agent 跟进行动",
+        "status": "completed",
+        "timestamp": timestamp,
+        "duration_ms": 0,
+        "output": follow_up_summary,
+        "agent_thought": "已进入方案执行跟进阶段，等待业务反馈后再做最终通过或驳回。",
+        "conclusion_from_step": follow_up_summary[:200],
+    })
+    quote["execution_trace"] = execution_trace
 
 
 # ============ API端点 ============
@@ -187,7 +288,10 @@ async def get_quote(quote_id: str):
 
 @app.post("/api/quotes/{quote_id}/decision")
 async def make_decision(quote_id: str, decision_input: DecisionInput):
-    """提交人工决策"""
+    """提交人工决策 — 写入DB并尝试恢复Agent执行"""
+    if decision_input.decision not in {"accept", "reject"}:
+        raise HTTPException(status_code=400, detail="最终决策仅支持 accept 或 reject")
+
     with get_connection() as conn:
         quote = update_quote_decision(
             conn, quote_id, decision_input.decision,
@@ -198,7 +302,120 @@ async def make_decision(quote_id: str, decision_input: DecisionInput):
         )
     if not quote:
         raise HTTPException(status_code=404, detail="报价不存在")
+
+    # 尝试恢复 Agent 执行（如果图在 node_wait_human 中断）
+    import asyncio
+    feedback = {
+        "decision": decision_input.decision,
+        "comment": decision_input.override_reason or "",
+        "additional_info": decision_input.override_reason or "",
+        "override_reasoning": "",
+        "step_index": -1,
+    }
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(agent.resume_with_feedback, quote_id, feedback),
+            timeout=120.0,
+        )
+        if result:
+            # 用 resume 后的最新分析结果补全当前报价，但保留人工最终决策状态
+            result = {
+                **result,
+                "id": quote_id,
+                "status": quote.get("status"),
+                "human_decision": decision_input.decision,
+                "decision_by": decision_input.decision_by,
+                "decision_at": datetime.now().isoformat(),
+                "override_price": decision_input.override_price,
+                "override_reason": decision_input.override_reason,
+                "selected_solution_id": decision_input.selected_solution_id,
+                "decision_log": quote.get("decision_log") or result.get("decision_log"),
+            }
+            with get_connection() as conn:
+                insert_quote(conn, result)
+            return result
+    except (ValueError, asyncio.TimeoutError, Exception) as e:
+        print(f"[Resume] 无法恢复图执行 {quote_id}: {e}")
+
     return quote
+
+
+@app.post("/api/quotes/{quote_id}/select-solution")
+async def select_solution(quote_id: str, solution_input: SolutionSelectionInput):
+    """选择执行方案并进入跟进阶段"""
+    with get_connection() as conn:
+        quote = get_quote_by_id(conn, quote_id)
+    if not quote:
+        raise HTTPException(status_code=404, detail="报价不存在")
+
+    solution = _find_solution(quote, solution_input.selected_solution_id)
+    if not solution:
+        raise HTTPException(status_code=404, detail="未找到所选方案")
+
+    follow_up_summary = _build_follow_up_summary(solution, solution_input.note)
+    feedback_context = _find_latest_feedback(quote)
+    decision_log = quote.get("decision_log") or []
+    if not isinstance(decision_log, list):
+        decision_log = []
+
+    decision_log.append({
+        "timestamp": datetime.now().isoformat(),
+        "decision_point": "solution_selection",
+        "options_considered": [sol.get("id", "") for sol in quote.get("solutions") or []],
+        "chosen_action": solution.get("title", solution_input.selected_solution_id),
+        "reasoning": (solution_input.note or follow_up_summary)[:500],
+        "confidence": solution.get("confidence", 0.7),
+        "source": "human",
+        "selected_solution_id": solution_input.selected_solution_id,
+        "selected_by": solution_input.selected_by,
+        "follow_up_summary": follow_up_summary,
+        "feedback_context": feedback_context,
+    })
+
+    quote["selected_solution_id"] = solution_input.selected_solution_id
+    quote["phase"] = "resolution"
+    quote["status"] = "pending"
+    quote["human_decision"] = None
+    quote["decision_by"] = None
+    quote["decision_at"] = None
+    quote["interrupt_reason"] = follow_up_summary
+    quote["decision_log"] = decision_log
+
+    _append_follow_up_trace(quote, solution, solution_input.selected_by, solution_input.note)
+
+    with get_connection() as conn:
+        insert_quote(conn, quote)
+
+    return quote
+
+
+@app.post("/api/quotes/{quote_id}/resume")
+async def resume_quote(quote_id: str, feedback_input: FeedbackInput):
+    """恢复 Agent 执行（Human-in-the-Loop 断点恢复）"""
+    import asyncio
+    feedback = {
+        "decision": feedback_input.feedback_type,
+        "comment": feedback_input.content[:500] if feedback_input.content else "",
+        "additional_info": feedback_input.content[:500] if feedback_input.content else "",
+        "override_reasoning": feedback_input.reasoning[:500] if feedback_input.reasoning else "",
+        "step_index": feedback_input.step_index,
+    }
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(agent.resume_with_feedback, quote_id, feedback),
+            timeout=120.0,
+        )
+        if result:
+            # 持久化恢复后的完整结果
+            with get_connection() as conn:
+                insert_quote(conn, result)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="恢复执行超时")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/quotes/{quote_id}/feedback")
@@ -298,23 +515,41 @@ async def apply_override(quote_id: str, override_input: OverrideInput):
     if not quote:
         raise HTTPException(status_code=404, detail="报价不存在")
 
+    feedback_context = override_input.feedback_context or _find_latest_feedback(quote, override_input.step_index)
+
     override_record = {
         "timestamp": datetime.now().isoformat(),
         "override_type": override_input.override_type,
         "override_value": override_input.override_value,
         "override_reason": override_input.override_reason,
         "step_index": override_input.step_index,
+        "feedback_context": feedback_context,
     }
 
     # 追加 override 记录
     with get_connection() as conn:
-        append_override_record(conn, quote_id, override_record)
+        updated_quote = append_override_record(conn, quote_id, override_record)
 
     # 如果有修改参数，触发重跑
     if override_input.modified_params and override_input.override_type == "price":
         rerun_input = RerunInput(params=override_input.modified_params)
         with get_connection() as conn:
             old_quote = get_quote_by_id(conn, quote_id)
+
+        feedback_lines = []
+        if feedback_context:
+            if feedback_context.get("additional_info"):
+                feedback_lines.append(f"人工反馈补充：{feedback_context['additional_info']}")
+            if feedback_context.get("override_reasoning"):
+                feedback_lines.append(f"人工修正推理：{feedback_context['override_reasoning']}")
+
+        description_parts = [
+            old_quote.get("description", ""),
+            *feedback_lines,
+            f"人工Override理由：{override_input.override_reason}",
+        ]
+        rerun_description = "\n".join(part for part in description_parts if part).strip()
+
         quote_input = {
             'material_id': old_quote.get('material_id', ''),
             'material_name': old_quote.get('material_name', ''),
@@ -327,7 +562,7 @@ async def apply_override(quote_id: str, override_input: OverrideInput):
             'dimensions': override_input.modified_params.get('dimensions', ''),
             'processing': override_input.modified_params.get('processing', ''),
             'precision': override_input.modified_params.get('precision', ''),
-            'description': override_input.modified_params.get('description', ''),
+            'description': override_input.modified_params.get('description') or rerun_description,
         }
         import asyncio
         try:
@@ -350,16 +585,19 @@ async def apply_override(quote_id: str, override_input: OverrideInput):
 
     return {
         "override_record": override_record,
-        "quote": quote,
+        "quote": updated_quote or quote,
     }
 
 
 def _compute_diff(old: Dict, new: Dict) -> Dict:
     """计算两个报价分析结果的差异"""
+    def is_number(val):
+        return isinstance(val, (int, float)) and not isinstance(val, bool)
+
     def safe(val):
         if val is None:
             return None
-        if isinstance(val, (int, float)):
+        if is_number(val):
             return round(float(val), 4)
         return val
 
@@ -375,7 +613,7 @@ def _compute_diff(old: Dict, new: Dict) -> Dict:
         new_val = safe(new.get(field))
         if old_val is not None or new_val is not None:
             diff[field] = {"old": old_val, "new": new_val}
-            if old_val is not None and new_val is not None:
+            if is_number(old_val) and is_number(new_val):
                 diff[field]["change"] = round(new_val - old_val, 4)
 
     # 比较诊断结论

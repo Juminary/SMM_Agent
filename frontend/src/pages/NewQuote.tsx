@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom'
 import {
   ArrowRight,
   Loader2,
-  CheckCircle,
   AlertCircle,
   ChevronDown,
   ChevronUp,
@@ -124,7 +123,6 @@ export default function NewQuote() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
-  const [useTemplate, setUseTemplate] = useState(false)
 
   const [formData, setFormData] = useState({
     material_id: '',
@@ -149,7 +147,7 @@ export default function NewQuote() {
   })
 
   // 防抖定时器
-  const [debounceTimer, setDebounceTimer] = useState<NodeJS.Timeout | null>(null)
+  const [debounceTimer, setDebounceTimer] = useState<ReturnType<typeof setTimeout> | null>(null)
 
   // 实时分析函数
   const performRealtimeAnalysis = useCallback(async () => {
@@ -219,13 +217,12 @@ export default function NewQuote() {
 
   // 应用模板
   const applyTemplate = (templateName: string) => {
-    const template = templates[templateName]
+    const template = templates[templateName as keyof typeof templates]
     if (template) {
       setFormData(prev => ({
         ...prev,
         ...template
       }))
-      setUseTemplate(false)
     }
   }
 

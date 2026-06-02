@@ -1,15 +1,24 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
-  X, DollarSign, Wrench, SlidersHorizontal, Flag,
+  X, DollarSign, SlidersHorizontal, Flag,
   Loader2, CheckCircle, AlertTriangle,
 } from 'lucide-react'
 import { applyOverride } from '../utils/api'
 import type { Quote, OverrideType, ReRunParams } from '../types'
 
+interface FeedbackContext {
+  feedback_type?: string
+  additional_info?: string
+  override_reasoning?: string
+  step_index?: number
+  timestamp?: string
+}
+
 interface OverrideModalProps {
   quote: Quote
   stepIndex?: number
   stepLabel?: string
+  feedbackContext?: FeedbackContext | null
   onClose: () => void
   onSuccess: (result: any) => void
 }
@@ -61,7 +70,14 @@ const OVERRIDE_TYPES = [
   },
 ]
 
-export default function OverrideModal({ quote, stepIndex = -1, stepLabel, onClose, onSuccess }: OverrideModalProps) {
+export default function OverrideModal({
+  quote,
+  stepIndex = -1,
+  stepLabel,
+  feedbackContext,
+  onClose,
+  onSuccess,
+}: OverrideModalProps) {
   const [selectedType, setSelectedType] = useState<OverrideType>('price')
   const [overrideValue, setOverrideValue] = useState('')
   const [overrideReason, setOverrideReason] = useState('')
@@ -69,6 +85,61 @@ export default function OverrideModal({ quote, stepIndex = -1, stepLabel, onClos
   const [error, setError] = useState('')
 
   const currentType = OVERRIDE_TYPES.find(t => t.type === selectedType)!
+  const rerunsAnalysis = selectedType === 'price'
+  const priceDelta = selectedType === 'price' && overrideValue
+    ? parseFloat(overrideValue) - quote.supplier_quote
+    : null
+  const feedbackSummary = useMemo(() => {
+    if (!feedbackContext) {
+      return ''
+    }
+    return [feedbackContext.additional_info, feedbackContext.override_reasoning]
+      .filter(Boolean)
+      .join('；')
+      .trim()
+  }, [feedbackContext])
+
+  useEffect(() => {
+    if (!feedbackContext) {
+      return
+    }
+
+    if (selectedType === 'flag') {
+      if (!overrideValue.trim()) {
+        setOverrideValue(feedbackContext.override_reasoning || feedbackContext.additional_info || '')
+      }
+      if (!overrideReason.trim()) {
+        setOverrideReason(
+          feedbackSummary
+            ? `基于此前人工反馈，确认当前判断需要标记误判：${feedbackSummary}`
+            : '基于此前人工反馈，确认当前判断需要标记误判。'
+        )
+      }
+      return
+    }
+
+    if (selectedType === 'solution') {
+      if (!overrideValue.trim() && feedbackContext.additional_info) {
+        setOverrideValue(feedbackContext.additional_info)
+      }
+      if (!overrideReason.trim()) {
+        setOverrideReason(
+          feedbackSummary
+            ? `结合此前人工反馈，补充执行方案：${feedbackSummary}`
+            : '结合此前人工反馈，补充一个更贴合业务的执行方案。'
+        )
+      }
+      return
+    }
+
+    if (!overrideReason.trim()) {
+      setOverrideReason(
+        feedbackSummary
+          ? `沿用此前人工反馈作为本次 Override 依据：${feedbackSummary}`
+          : '沿用此前人工反馈作为本次 Override 的人工依据。'
+      )
+    }
+  }, [feedbackContext, feedbackSummary, overrideReason, overrideValue, selectedType])
 
   const handleSubmit = async () => {
     setLoading(true)
@@ -108,6 +179,7 @@ export default function OverrideModal({ quote, stepIndex = -1, stepLabel, onClos
         override_reason: overrideReason,
         step_index: stepIndex,
         modified_params: modifiedParams,
+        feedback_context: feedbackContext || undefined,
       })
       onSuccess(result)
     } catch (e: any) {
@@ -155,6 +227,7 @@ export default function OverrideModal({ quote, stepIndex = -1, stepLabel, onClos
                   <div className={`text-sm font-medium ${
                     selectedType === t.type ? '' : 'text-gray-700'
                   }`}>{t.label}</div>
+                  <div className="text-[11px] text-gray-500 mt-1 leading-relaxed">{t.desc}</div>
                 </div>
               </button>
             ))}
@@ -163,12 +236,22 @@ export default function OverrideModal({ quote, stepIndex = -1, stepLabel, onClos
 
         {/* Override Value Input */}
         <div className="px-6 pb-3">
+          {feedbackContext && feedbackSummary && (
+            <div className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 mb-3">
+              <div className="text-xs font-medium text-blue-700 mb-1">将复用最近的人工反馈</div>
+              <p className="text-xs text-blue-700 leading-relaxed">{feedbackSummary}</p>
+            </div>
+          )}
+
           <div className={`rounded-xl border ${currentType.border} ${currentType.bg} p-4 mb-3`}>
             <div className="flex items-center gap-2 mb-1.5">
               <currentType.icon size={14} style={{ color: currentType.color }} />
               <span className="text-sm font-medium" style={{ color: currentType.color }}>{currentType.label}</span>
             </div>
             <p className="text-xs text-gray-500">{currentType.desc}</p>
+            <div className="mt-2 text-[11px] text-gray-600">
+              {rerunsAnalysis ? '提交后会立即触发重跑，并返回新旧结果差异。' : '提交后会记录人工判断，不会自动重跑当前分析。'}
+            </div>
           </div>
 
           <label className="text-sm font-medium text-gray-700 mb-1.5 block">
@@ -221,10 +304,25 @@ export default function OverrideModal({ quote, stepIndex = -1, stepLabel, onClos
 
         {/* Current Quote Summary */}
         <div className="px-6 pb-3">
-          <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-500">
-            当前报价：<span className="font-medium text-gray-700">{quote.material_name}</span>
-            {' '}({quote.supplier_name}) · <span className="font-medium text-gray-700">¥{quote.supplier_quote}</span>
-            {' '}· 偏离度 <span className="font-medium text-gray-700">{quote.deviation_score}</span>分
+          <div className="bg-gray-50 rounded-xl p-3 text-xs text-gray-500 space-y-2">
+            <div>
+              当前报价：<span className="font-medium text-gray-700">{quote.material_name}</span>
+              {' '}({quote.supplier_name}) · <span className="font-medium text-gray-700">¥{quote.supplier_quote}</span>
+              {' '}· 偏离度 <span className="font-medium text-gray-700">{quote.deviation_score}</span>分
+            </div>
+            {rerunsAnalysis && priceDelta !== null && !Number.isNaN(priceDelta) && (
+              <div className={`inline-flex px-2 py-1 rounded-full border ${
+                priceDelta < 0
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  : priceDelta > 0
+                  ? 'bg-red-50 text-red-700 border-red-200'
+                  : 'bg-gray-100 text-gray-600 border-gray-200'
+              }`}>
+                {priceDelta > 0 ? '较当前报价上调' : priceDelta < 0 ? '较当前报价下调' : '与当前报价持平'}
+                {' '}
+                ¥{Math.abs(priceDelta).toFixed(2)}
+              </div>
+            )}
           </div>
         </div>
 

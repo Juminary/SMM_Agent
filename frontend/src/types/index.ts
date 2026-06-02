@@ -87,6 +87,7 @@ export interface Quote {
   human_decision?: string
   decision_by?: string
   decision_at?: string
+  selected_solution_id?: string | null
   created_at: string
 }
 
@@ -149,6 +150,20 @@ export interface DecisionLogEntry {
   chosen_action: string
   reasoning: string
   confidence: number
+  source?: string               // "agent" | "human"
+  override_reasoning?: string   // 人工override理由
+  override_type?: string        // "price" | "solution" | "model_param" | "flag"
+  is_override?: boolean         // 是否为override记录
+  feedback_context?: {
+    feedback_type?: string
+    additional_info?: string
+    override_reasoning?: string
+    step_index?: number
+    timestamp?: string
+  }
+  selected_solution_id?: string
+  selected_by?: string
+  follow_up_summary?: string
 }
 
 // ===== 供应商画像 =====

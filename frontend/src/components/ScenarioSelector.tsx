@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
-  Zap, TrendingUp, CheckCircle, Brain, BarChart3, Globe,
-  ArrowRight, Play, RotateCcw, User, Clock, Target,
+  Zap, TrendingUp, CheckCircle, Globe,
+  Play,
 } from 'lucide-react'
 
 interface Scenario {
@@ -138,10 +138,9 @@ const SCENARIOS: Scenario[] = [
 
 interface ScenarioSelectorProps {
   onSelectScenario: (scenario: Scenario) => void
-  onStartDemo?: () => void
 }
 
-export default function ScenarioSelector({ onSelectScenario, onStartDemo }: ScenarioSelectorProps) {
+export default function ScenarioSelector({ onSelectScenario }: ScenarioSelectorProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [filterCategory, setFilterCategory] = useState<string | null>(null)
 

@@ -347,7 +347,7 @@ class PricePredictor(Tool):
     def _cache_path() -> str:
         import os
         data_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "data",
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data",
         )
         return os.path.join(data_dir, "bayesian_model_cache.npz")
 
@@ -359,7 +359,9 @@ class PricePredictor(Tool):
 
     def _save_cache(self) -> None:
         import numpy as np
+        import os
         params = self._bayes_params
+        os.makedirs(os.path.dirname(self._cache_path()), exist_ok=True)
         np.savez(
             self._cache_path(),
             alpha_cat=params['alpha_cat'],
@@ -2500,7 +2502,7 @@ class AgentOrchestrator:
         self.available_tools = self.registry.list_tools()
 
         # 每个报价生成唯一 thread_id，用于 checkpoint 恢复
-        self._thread_store = {}
+        # Thread mapping 持久化到 agent_threads 表，服务器重启后仍可恢复
 
     def _new_thread_id(self) -> str:
         """生成新的 thread id"""
@@ -2519,7 +2521,14 @@ class AgentOrchestrator:
             quote_data['id'] = f"Q-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
         thread_id = self._new_thread_id()
-        self._thread_store[quote_data['id']] = thread_id
+
+        # 持久化线程映射到 SQLite（服务器重启后可恢复）
+        from app.db.database import get_connection, save_thread_mapping
+        conn = get_connection()
+        try:
+            save_thread_mapping(conn, quote_data['id'], thread_id)
+        finally:
+            conn.close()
 
         try:
             result = self._graph.invoke(
@@ -2558,12 +2567,17 @@ class AgentOrchestrator:
         用于 Human-in-the-loop 断点恢复
         """
         from langgraph.types import Command
-        thread_id = self._thread_store.get(quote_id)
+        from app.db.database import get_connection, get_thread_mapping
+        conn = get_connection()
+        try:
+            thread_id = get_thread_mapping(conn, quote_id)
+        finally:
+            conn.close()
         if not thread_id:
             raise ValueError(f"未找到报价 {quote_id} 的执行线程")
 
         result = self._graph.invoke(
-            Command(resume={"human_feedback": feedback}),
+            Command(resume=feedback),
             config={
                 "configurable": {"thread_id": thread_id},
                 "recursion_limit": 50,
@@ -2582,7 +2596,14 @@ class AgentOrchestrator:
         """
         thread_id = self._new_thread_id()
         quote_id = quote_data.get('id', f"Q-{datetime.now().strftime('%Y%m%d%H%M%S')}")
-        self._thread_store[quote_id] = thread_id
+
+        # 持久化线程映射
+        from app.db.database import get_connection, save_thread_mapping
+        conn = get_connection()
+        try:
+            save_thread_mapping(conn, quote_id, thread_id)
+        finally:
+            conn.close()
 
         if modified_params:
             quote_data = {**quote_data, **modified_params}

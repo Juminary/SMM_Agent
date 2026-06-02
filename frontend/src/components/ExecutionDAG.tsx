@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from 'react'
+import { useMemo, useCallback } from 'react'
 import {
   ReactFlow,
   Background,
@@ -12,11 +12,9 @@ import {
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 import {
-  Database, Target, Wrench, TrendingUp, GitBranch, Brain,
-  Search, CheckCircle, Shield, Zap, Activity, ChevronRight,
-  Clock, User, BarChart3, Globe, Lightbulb,
+  Database, Brain, CheckCircle, Shield, Activity, Lightbulb,
 } from 'lucide-react'
-import type { TraceStep, Quote } from '../types'
+import type { TraceStep } from '../types'
 
 // ===== Node type definitions =====
 type NodeType = 'baseline' | 'diagnosis' | 'decision' | 'human' | 'fastpass' | 'start' | 'end'
@@ -46,7 +44,7 @@ const NODE_COLORS: Record<NodeType, { bg: string; border: string; text: string; 
 
 // ===== Custom Node Components =====
 
-function BaselineNode({ data }: NodeProps<Node<DAGNodeData>>) {
+function BaselineNode({ data }: NodeProps<DAGNodeData>) {
   const cfg = NODE_COLORS.baseline
   return (
     <div className="px-3 py-2.5 rounded-xl border-2 shadow-sm min-w-[140px]" style={{ background: cfg.bg, borderColor: cfg.border }}>
@@ -62,7 +60,7 @@ function BaselineNode({ data }: NodeProps<Node<DAGNodeData>>) {
   )
 }
 
-function DiagnosisNode({ data }: NodeProps<Node<DAGNodeData>>) {
+function DiagnosisNode({ data }: NodeProps<DAGNodeData>) {
   const cfg = NODE_COLORS.diagnosis
   const isActive = data.status === 'active'
   return (
@@ -94,7 +92,7 @@ function DiagnosisNode({ data }: NodeProps<Node<DAGNodeData>>) {
   )
 }
 
-function FastPassNode({ data }: NodeProps<Node<DAGNodeData>>) {
+function FastPassNode({ data }: NodeProps<DAGNodeData>) {
   const cfg = NODE_COLORS.fastpass
   return (
     <div className="px-3 py-2.5 rounded-xl border-2 shadow-sm min-w-[120px]" style={{ background: cfg.bg, borderColor: cfg.border }}>
@@ -109,7 +107,7 @@ function FastPassNode({ data }: NodeProps<Node<DAGNodeData>>) {
   )
 }
 
-function HumanNode({ data }: NodeProps<Node<DAGNodeData>>) {
+function HumanNode({ data }: NodeProps<DAGNodeData>) {
   const cfg = NODE_COLORS.human
   return (
     <div className="px-3 py-2.5 rounded-xl border-2 shadow-sm min-w-[120px]" style={{ background: cfg.bg, borderColor: cfg.border }}>
@@ -124,7 +122,7 @@ function HumanNode({ data }: NodeProps<Node<DAGNodeData>>) {
   )
 }
 
-function DecisionNode({ data }: NodeProps<Node<DAGNodeData>>) {
+function DecisionNode({ data }: NodeProps<DAGNodeData>) {
   const cfg = NODE_COLORS.decision
   return (
     <div className="px-3 py-2.5 rounded-xl border-2 shadow-sm min-w-[130px]" style={{ background: cfg.bg, borderColor: cfg.border }}>
@@ -263,6 +261,7 @@ function buildDAGFromTrace(trace: TraceStep[], currentStepIdx: number = -1) {
     // Group diagnosis steps by round
     let currentRound: Node<DAGNodeData>[] = []
     let roundY = yOffset + stepHeight
+    let lastDiagNodeId = 'diag-start'  // track last diagnosis node for human edge
 
     diagSteps.forEach((step, i) => {
       if (step.step === '诊断启动') {
@@ -274,7 +273,7 @@ function buildDAGFromTrace(trace: TraceStep[], currentStepIdx: number = -1) {
             position: { x: 300, y: roundY },
             data: {
               label: `推理轮次 ${Math.floor(i / 3) + 1}`,
-              sublabel: currentRound[0]?.sublabel?.slice(0, 30),
+              sublabel: currentRound[0]?.data.sublabel?.slice(0, 30),
               nodeType: 'diagnosis',
               status: 'completed',
             },
@@ -307,6 +306,7 @@ function buildDAGFromTrace(trace: TraceStep[], currentStepIdx: number = -1) {
             index: i,
           },
         })
+        lastDiagNodeId = `agent-${i}`
         if (currentRound.length > 0) {
           edges.push({
             id: `e-prev-${i}`,
@@ -343,6 +343,7 @@ function buildDAGFromTrace(trace: TraceStep[], currentStepIdx: number = -1) {
           },
         })
         currentRound.push(nodes[nodes.length - 1])
+        lastDiagNodeId = `tool-${i}`
       }
     })
 
@@ -359,6 +360,7 @@ function buildDAGFromTrace(trace: TraceStep[], currentStepIdx: number = -1) {
           status: 'completed',
         },
       })
+      lastDiagNodeId = roundId
       currentRound.forEach((n, j) => {
         edges.push({
           id: `e-final-tool-${j}`,
@@ -380,7 +382,7 @@ function buildDAGFromTrace(trace: TraceStep[], currentStepIdx: number = -1) {
     })
     edges.push({
       id: 'e-final-human',
-      source: 'diag-start',
+      source: lastDiagNodeId,
       target: 'human',
       type: 'smoothstep',
       style: { stroke: '#10b981', strokeWidth: 2 },
@@ -424,8 +426,6 @@ export default function ExecutionDAG({
   showControls = true,
   showMinimap = false,
 }: ExecutionDAGProps) {
-  const [selectedNode, setSelectedNode] = useState<string | null>(null)
-
   const { nodes: flowNodes, edges: flowEdges } = useMemo(
     () => buildDAGFromTrace(trace, currentStepIdx),
     [trace, currentStepIdx]
@@ -433,7 +433,6 @@ export default function ExecutionDAG({
 
   const onNodeClickHandler = useCallback(
     (_: React.MouseEvent, node: Node<DAGNodeData>) => {
-      setSelectedNode(prev => prev === node.id ? null : node.id)
       if (onNodeClick) {
         onNodeClick(node)
       }

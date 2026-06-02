@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS quotes (
     -- 第二阶段：诊断结果
     diagnosis_conclusion    TEXT DEFAULT NULL,   -- JSON
     diagnosis_investigations TEXT DEFAULT NULL,  -- JSON
+    diagnosis_hypotheses     TEXT DEFAULT NULL,  -- JSON
     decision_log            TEXT DEFAULT NULL,   -- JSON
 
     -- 方案与上下文
@@ -268,6 +269,14 @@ CREATE TABLE IF NOT EXISTS checkpoint_writes (
     value           BLOB,
     PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
 );
+
+-- ===== Agent Thread Store (持久化线程映射，支持重启后恢复) =====
+CREATE TABLE IF NOT EXISTS agent_threads (
+    quote_id    TEXT PRIMARY KEY,
+    thread_id   TEXT NOT NULL,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -351,7 +360,8 @@ def insert_quote(conn, quote: Dict[str, Any]) -> None:
         "solutions", "cost_breakdown", "similar_materials", "rag_info",
         "supplier_profile", "peer_benchmark", "market_context",
         "inventory_context", "alternatives", "execution_trace",
-        "diagnosis_conclusion", "diagnosis_investigations", "decision_log",
+        "diagnosis_conclusion", "diagnosis_investigations", "diagnosis_hypotheses",
+        "decision_log",
     ]
     values = {}
     for k, v in quote.items():
@@ -369,7 +379,7 @@ def insert_quote(conn, quote: Dict[str, Any]) -> None:
             price_deviation, cost_deviation, market_deviation,
             composite_score, external_deviation,
             phase, interrupt_severity, interrupt_reason,
-            diagnosis_conclusion, diagnosis_investigations, decision_log,
+            diagnosis_conclusion, diagnosis_investigations, diagnosis_hypotheses, decision_log,
             solutions, cost_breakdown, similar_materials, rag_info,
             supplier_profile, peer_benchmark, market_context,
             inventory_context, alternatives, llm_summary,
@@ -379,7 +389,7 @@ def insert_quote(conn, quote: Dict[str, Any]) -> None:
             created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                   ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             values.get("id", ""),
             values.get("material_id", ""),
@@ -408,6 +418,7 @@ def insert_quote(conn, quote: Dict[str, Any]) -> None:
             values.get("interrupt_reason"),
             values.get("diagnosis_conclusion"),
             values.get("diagnosis_investigations"),
+            values.get("diagnosis_hypotheses"),
             values.get("decision_log"),
             values.get("solutions"),
             values.get("cost_breakdown"),
@@ -501,15 +512,35 @@ def update_quote_decision(
 ) -> Optional[Dict[str, Any]]:
     decision_map = {"accept": "approved", "reject": "rejected", "negotiate": "negotiate"}
     normalized = decision_map.get(decision, decision)
+    row = conn.execute("SELECT decision_log FROM quotes WHERE id=?", (quote_id,)).fetchone()
+    if not row:
+        return None
+
+    log = json.loads(row["decision_log"]) if isinstance(row["decision_log"], str) and row["decision_log"] else []
+    if not isinstance(log, list):
+        log = []
+
+    log.append({
+        "timestamp": datetime.now().isoformat(),
+        "decision_point": "final_decision",
+        "options_considered": [selected_solution_id] if selected_solution_id else [],
+        "chosen_action": decision,
+        "reasoning": (override_reason or "")[:500],
+        "confidence": 1.0,
+        "source": "human",
+        "selected_solution_id": selected_solution_id,
+        "override_price": override_price,
+    })
 
     conn.execute(
         """UPDATE quotes SET status=?, human_decision=?, decision_by=?,
            decision_at=?, override_price=?, override_reason=?,
-           selected_solution_id=?
+           selected_solution_id=?, decision_log=?
            WHERE id=?""",
         (
             normalized, decision, decision_by, datetime.now().isoformat(),
-            override_price, override_reason, selected_solution_id, quote_id,
+            override_price, override_reason, selected_solution_id,
+            json.dumps(log, ensure_ascii=False), quote_id,
         ),
     )
     conn.commit()
@@ -574,12 +605,39 @@ def append_override_record(
         "override_type": override_record.get("override_type"),
         "override_value": override_record.get("override_value"),
         "is_override": True,
+        "feedback_context": override_record.get("feedback_context"),
     }
     log.append(override_entry)
 
     conn.execute("UPDATE quotes SET decision_log=? WHERE id=?", (json.dumps(log, ensure_ascii=False), quote_id))
     conn.commit()
     return get_quote_by_id(conn, quote_id)
+
+
+# ---- Agent Thread Store (持久化 quote_id -> thread_id 映射) ----
+
+def save_thread_mapping(conn, quote_id: str, thread_id: str) -> None:
+    """保存报价到执行线程的映射（支持服务器重启后恢复）"""
+    conn.execute(
+        """INSERT OR REPLACE INTO agent_threads (quote_id, thread_id, updated_at)
+           VALUES (?, ?, datetime('now'))""",
+        (quote_id, thread_id),
+    )
+    conn.commit()
+
+
+def get_thread_mapping(conn, quote_id: str) -> Optional[str]:
+    """获取报价对应的执行线程ID"""
+    row = conn.execute(
+        "SELECT thread_id FROM agent_threads WHERE quote_id = ?", (quote_id,)
+    ).fetchone()
+    return row["thread_id"] if row else None
+
+
+def delete_thread_mapping(conn, quote_id: str) -> None:
+    """删除报价的线程映射"""
+    conn.execute("DELETE FROM agent_threads WHERE quote_id = ?", (quote_id,))
+    conn.commit()
 
 
 # ---- External References ----
@@ -727,7 +785,8 @@ def _unpack_quote(row) -> Dict[str, Any]:
         "solutions", "cost_breakdown", "similar_materials", "rag_info",
         "supplier_profile", "peer_benchmark", "market_context",
         "inventory_context", "alternatives", "execution_trace",
-        "diagnosis_conclusion", "diagnosis_investigations", "decision_log",
+        "diagnosis_conclusion", "diagnosis_investigations", "diagnosis_hypotheses",
+        "decision_log",
     ]
     for field in json_fields:
         val = d.get(field)
