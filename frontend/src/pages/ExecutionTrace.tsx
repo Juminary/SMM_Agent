@@ -6,13 +6,14 @@ import {
   Search, BarChart3, Globe, Clock, Target, TrendingUp,
   MessageSquare, AlertTriangle, CheckCircle, XCircle,
   HelpCircle, Sparkles, GitBranch, BarChart2,
-  SlidersHorizontal,
+  SlidersHorizontal, FileSpreadsheet,
 } from 'lucide-react'
-import { fetchQuote, submitHumanFeedback } from '../utils/api'
+import { fetchQuote } from '../utils/api'
 import type { Quote, DiagnosisHypothesis, TraceStep, DecisionLogEntry } from '../types'
 import OverrideModal from '../components/OverrideModal'
 import DiffView from '../components/DiffView'
 import ExecutionDAG from '../components/ExecutionDAG'
+import * as XLSX from 'xlsx'
 
 // ===== Tool icon mapping =====
 const TOOL_ICONS: Record<string, any> = {
@@ -51,10 +52,9 @@ export default function ExecutionTrace() {
   const [selectedStep, setSelectedStep] = useState<number | null>(null)
   const [showOverride, setShowOverride] = useState(false)
   const [showDiff, setShowDiff] = useState(false)
-  const [showFeedback, setShowFeedback] = useState<number | null>(null)
   const [speed, setSpeed] = useState(1)
   const [filterPhase2, setFilterPhase2] = useState(false)
-  const [simpleView, setSimpleView] = useState(false)
+  const [simpleView, setSimpleView] = useState(true)
   const [actionNotice, setActionNotice] = useState<{ tone: 'success' | 'error' | 'info'; message: string } | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -200,6 +200,13 @@ export default function ExecutionTrace() {
               <BarChart2 size={13} />
               对比重跑
             </button>
+            <button
+              onClick={() => exportReport(quote)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-indigo-200 text-indigo-600 rounded-lg hover:bg-indigo-50 transition-colors bg-white shadow-sm"
+            >
+              <FileSpreadsheet size={13} />
+              导出报告
+            </button>
           </div>
         </div>
 
@@ -208,7 +215,7 @@ export default function ExecutionTrace() {
         )}
 
         {/* ===== Controls bar ===== */}
-        <div className="bg-white rounded-2xl border p-4 flex flex-wrap items-center justify-between gap-3 shadow-sm">
+        <div className="bg-white rounded-xl border border-gray-100 p-3 flex flex-wrap items-center justify-between gap-2 shadow-sm">
           <div className="flex items-center gap-3">
             {/* View mode tabs */}
             <div className="flex bg-gray-100 rounded-lg p-0.5">
@@ -413,7 +420,6 @@ export default function ExecutionTrace() {
                             setSelectedStep(prev => prev === i ? null : i)
                           }}
                           onOverride={() => setShowOverride(true)}
-                          onFeedback={() => setShowFeedback(i)}
                           simpleView={simpleView}
                         />
                       ))}
@@ -439,11 +445,6 @@ export default function ExecutionTrace() {
               onJumpToCurrent={() => {
                 if (actionStepIndex != null) {
                   setSelectedStep(actionStepIndex)
-                }
-              }}
-              onOpenFeedback={() => {
-                if (actionStepIndex != null) {
-                  setShowFeedback(actionStepIndex)
                 }
               }}
               onOpenOverride={() => setShowOverride(true)}
@@ -474,36 +475,6 @@ export default function ExecutionTrace() {
             )}
           </div>
         </div>
-
-        {/* ===== Feedback Modal ===== */}
-        {showFeedback != null && (
-          <FeedbackModal
-            step={displaySteps[showFeedback]}
-            onClose={() => setShowFeedback(null)}
-            onSubmit={async (feedback) => {
-              try {
-                await submitHumanFeedback(id!, {
-                  feedback_type: feedback.feedbackType,
-                  content: feedback.additionalInfo,
-                  reasoning: feedback.overrideReasoning,
-                  step_index: showFeedback,
-                })
-                await loadQuote()
-                setActionNotice({
-                  tone: 'success',
-                  message: `已记录对步骤“${displaySteps[showFeedback]?.data?.step || showFeedback}”的人工反馈。继续执行 Override 时会自动复用这条反馈。`,
-                })
-              } catch (e: any) {
-                console.error('Failed to submit feedback:', e)
-                setActionNotice({
-                  tone: 'error',
-                  message: e?.response?.data?.detail || e?.message || '提交反馈失败',
-                })
-              }
-              setShowFeedback(null)
-            }}
-          />
-        )}
 
         {/* ===== Override Modal ===== */}
         {showOverride && quote && (
@@ -577,20 +548,13 @@ function SummaryStatCard({
   icon: any
 }) {
   return (
-    <div className="bg-white rounded-2xl border shadow-sm p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-xs text-gray-400">{label}</div>
-          <div className="text-base font-semibold text-gray-900 mt-1">{value}</div>
-        </div>
-        <div
-          className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
-          style={{ background: `${accent}18`, color: accent }}
-        >
-          <Icon size={16} />
-        </div>
+    <div className="bg-white rounded-xl border border-gray-100 p-3.5">
+      <div className="flex items-center gap-2 mb-1">
+        <Icon size={13} style={{ color: accent }} />
+        <span className="text-[11px] text-gray-400">{label}</span>
       </div>
-      <p className="text-xs text-gray-500 mt-2 leading-relaxed">{caption}</p>
+      <div className="text-sm font-semibold text-gray-900">{value}</div>
+      <p className="text-[11px] text-gray-400 mt-0.5 leading-relaxed">{caption}</p>
     </div>
   )
 }
@@ -623,7 +587,6 @@ function TaskGuideCard({
   currentStep,
   hasActionStep,
   onJumpToCurrent,
-  onOpenFeedback,
   onOpenOverride,
   onOpenDiff,
 }: {
@@ -634,7 +597,6 @@ function TaskGuideCard({
   currentStep: DisplayStep | null
   hasActionStep: boolean
   onJumpToCurrent: () => void
-  onOpenFeedback: () => void
   onOpenOverride: () => void
   onOpenDiff: () => void
 }) {
@@ -665,13 +627,6 @@ function TaskGuideCard({
           className="px-3 py-2 rounded-xl border border-gray-200 text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           聚焦当前步骤
-        </button>
-        <button
-          onClick={onOpenFeedback}
-          disabled={!hasActionStep}
-          className="px-3 py-2 rounded-xl border border-blue-200 text-sm text-blue-700 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          注入反馈
         </button>
         <button
           onClick={onOpenOverride}
@@ -760,13 +715,12 @@ function EmptyFocusPanel({
   )
 }
 
-function TimelineStep({ step, isActive, isPast, onClick, onOverride, onFeedback, simpleView }: {
+function TimelineStep({ step, isActive, isPast, onClick, onOverride, simpleView }: {
   step: DisplayStep
   isActive: boolean
   isPast: boolean
   onClick: () => void
   onOverride: () => void
-  onFeedback: () => void
   simpleView?: boolean
 }) {
   const data = step.data
@@ -776,39 +730,32 @@ function TimelineStep({ step, isActive, isPast, onClick, onOverride, onFeedback,
 
   if (isBaseline) {
     const Icon = traceIcon(data.step)
-    const color = PHASE_COLORS.baseline
     return (
       <div
-        className={`flex items-start gap-4 py-2 px-3 rounded-xl cursor-pointer transition-all group ${
-          isActive ? 'bg-indigo-50 ring-1 ring-indigo-200' : 'hover:bg-gray-50'
+        className={`flex items-start gap-3 py-2.5 px-3 rounded-xl cursor-pointer transition-all ${
+          isActive ? 'bg-indigo-50 shadow-sm' : 'hover:bg-gray-50'
         }`}
-        style={{ opacity: isPast || isActive ? 1 : 0.45 }}
+        style={{ opacity: isPast || isActive ? 1 : 0.4 }}
         onClick={onClick}
       >
-        <div className="relative z-10">
-          <div
-            className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 shadow-sm"
-            style={{ background: isActive ? color : (isPast ? color + '22' : '#f3f4f6') }}
-          >
-            <Icon size={15} style={{ color: isActive ? '#fff' : color }} />
-          </div>
+        <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+          isActive ? 'bg-indigo-500 text-white shadow-sm' : isPast ? 'bg-indigo-100 text-indigo-500' : 'bg-gray-100 text-gray-300'
+        }`}>
+          <Icon size={14} />
         </div>
-        <div className="flex-1 min-w-0 py-1">
+        <div className="flex-1 min-w-0 py-0.5">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-gray-800">{displayStep}</span>
+            <span className={`text-sm ${isActive ? 'font-semibold text-indigo-700' : 'font-medium text-gray-700'}`}>{displayStep}</span>
             {data.tool && (
-              <span className="text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
-                {simpleView ? simpleLabel(data.tool) : data.tool}
-              </span>
+              <span className="text-[10px] text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded">{data.tool}</span>
             )}
           </div>
-          <p className="text-xs text-gray-500 mt-0.5">{displayOutput}</p>
+          <RenderOutput text={displayOutput} step={displayStep} />
         </div>
         <div className="flex items-center gap-1 shrink-0">
           {data.duration_ms ? (
-            <span className="text-xs text-gray-300 font-mono">{data.duration_ms.toFixed(0)}ms</span>
+            <span className="text-[10px] text-gray-300">{data.duration_ms.toFixed(0)}ms</span>
           ) : null}
-          {isActive && <ChevronRight size={14} className="text-indigo-500 animate-pulse" />}
         </div>
       </div>
     )
@@ -846,11 +793,7 @@ function TimelineStep({ step, isActive, isPast, onClick, onOverride, onFeedback,
             <span className="text-xs text-gray-400">{data.decision.slice(0, 40)}</span>
           )}
         </div>
-        <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button onClick={(e) => { e.stopPropagation(); onFeedback() }}
-            className="p-1.5 hover:bg-blue-100 rounded-lg text-blue-500 transition-colors" title="注入反馈">
-            <MessageSquare size={13} />
-          </button>
+        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
           <button onClick={(e) => { e.stopPropagation(); onOverride() }}
             className="p-1.5 hover:bg-indigo-100 rounded-lg text-indigo-500 transition-colors" title="Override">
             <SlidersHorizontal size={13} />
@@ -865,9 +808,7 @@ function TimelineStep({ step, isActive, isPast, onClick, onOverride, onFeedback,
             <Brain size={12} className="text-purple-500" />
             <span className="text-xs font-semibold text-purple-600">Agent 思考</span>
           </div>
-          <p className="text-sm text-gray-700 leading-relaxed">
-            {typeof hasThought === 'string' ? hasThought.slice(0, 280) : ''}
-          </p>
+          <FormattedThought text={typeof hasThought === 'string' ? hasThought.slice(0, 280) : ''} />
         </div>
       )}
 
@@ -901,6 +842,185 @@ function TimelineStep({ step, isActive, isPast, onClick, onOverride, onFeedback,
         </div>
       )}
     </div>
+  )
+}
+
+// ── 渲染输出文本（结构化展示关键数据） ──
+function RenderOutput({ text, step }: { text: string; step: string }) {
+  if (!text) return null
+
+  // 价格预测: P10/P50/P90
+  const priceMatch = text.match(/P10=¥([\d.]+)\s*\/\s*P50=¥([\d.]+)\s*\/\s*P90=¥([\d.]+)/)
+  if (priceMatch) {
+    return (
+      <div className="flex items-center gap-2 mt-0.5">
+        <span className="text-[11px] bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded font-medium">基准 ¥{priceMatch[2]}</span>
+        <span className="text-[10px] text-gray-400">区间 ¥{priceMatch[1]}~¥{priceMatch[3]}</span>
+      </div>
+    )
+  }
+
+  // 成本拆解: 锚点 + 异常项
+  const costMatch = text.match(/锚点.*?¥([\d.]+)/)
+  const anomalyMatch = text.match(/异常项[=:](\d+)/)
+  if (step.includes('成本') && costMatch) {
+    return (
+      <div className="flex items-center gap-2 mt-0.5">
+        <span className="text-[11px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded font-medium">锚点 ¥{costMatch[1]}</span>
+        {anomalyMatch && <span className="text-[10px] text-gray-400">{anomalyMatch[1]} 项异常</span>}
+      </div>
+    )
+  }
+
+  // 偏离度: 分数
+  const scoreMatch = text.match(/偏离度[=:](\d+[.]?\d*)/)
+  const sevMatch = text.match(/[（(](正常|关注|警示|紧急)[)）]/)
+  if (step.includes('偏离') && scoreMatch) {
+    const sevColor = sevMatch?.[1] === '紧急' ? '#ef4444' : sevMatch?.[1] === '警示' ? '#f97316' : sevMatch?.[1] === '关注' ? '#eab308' : '#10b981'
+    return (
+      <div className="flex items-center gap-2 mt-0.5">
+        <span className="text-[11px] font-semibold font-mono" style={{ color: sevColor }}>{scoreMatch[1]} 分</span>
+        {sevMatch && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: sevColor + '18', color: sevColor }}>{sevMatch[1]}</span>}
+      </div>
+    )
+  }
+
+  // 相似物料: 数量
+  const simMatch = text.match(/检索到\s*(\d+)\s*条/)
+  if (step.includes('相似') && simMatch) {
+    return <div className="text-xs text-gray-500 mt-0.5">检索到 {simMatch[1]} 条相似物料</div>
+  }
+
+  // 诊断结论
+  if (step.includes('诊断结论')) {
+    return <div className="text-xs text-gray-500 mt-0.5 line-clamp-2">{text.slice(0, 120)}</div>
+  }
+
+  // 方案生成
+  if (step.includes('方案')) {
+    const solMatch = text.match(/(\d+)\s*个方案/)
+    if (solMatch) return <div className="text-xs text-emerald-600 mt-0.5">生成 {solMatch[1]} 个方案 ✓</div>
+  }
+
+  // 分流决策
+  if (step.includes('分流')) {
+    const isFast = text.includes('快速通道')
+    return (
+      <div className="flex items-center gap-2 mt-0.5">
+        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${isFast ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
+          {isFast ? '自动通过' : '进入诊断'}
+        </span>
+      </div>
+    )
+  }
+
+  // 兜底: 纯文本
+  return <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{text}</p>
+}
+
+// ── 渲染 AI 推理文本（高亮数字、价格、关键指标） ──
+function FormattedThought({ text }: { text: string }) {
+  if (!text) return null
+  const blocks = text.split('\n')
+  const elements: React.ReactNode[] = []
+  let inTable = false
+  let tableRows: string[][] = []
+
+  for (let i = 0; i < blocks.length; i++) {
+    const line = blocks[i]
+
+    // 表格行: | a | b | c |
+    if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
+      const cells = line.split('|').filter(c => c.trim() && c !== '---').map(c => c.trim())
+      if (cells.length > 0) {
+        // 跳过表格分隔行 (|---|---|---|)
+        if (!line.includes('---')) {
+          tableRows.push(cells)
+        }
+        inTable = true
+      }
+      continue
+    }
+
+    // 表格结束
+    if (inTable && !line.trim().startsWith('|')) {
+      elements.push(renderTable(tableRows))
+      tableRows = []
+      inTable = false
+    }
+
+    // 空行
+    if (!line.trim()) continue
+
+    // ## 标题
+    if (line.startsWith('## ')) {
+      elements.push(<h2 key={`h2-${i}`} className="text-sm font-bold text-gray-800 mt-3 mb-1">{line.replace('## ', '')}</h2>)
+      continue
+    }
+    if (line.startsWith('### ')) {
+      elements.push(<h3 key={`h3-${i}`} className="text-xs font-semibold text-gray-600 mt-2 mb-1">{line.replace('### ', '')}</h3>)
+      continue
+    }
+    if (line.startsWith('**') && line.endsWith('**')) {
+      elements.push(<div key={`em-${i}`} className="text-sm font-semibold text-gray-800 my-1">{line.replace(/\*\*/g, '')}</div>)
+      continue
+    }
+
+    // 普通行：渲染带高亮的文本
+    elements.push(<InlineText key={`t-${i}`} text={line} />)
+  }
+
+  // 收尾未关闭的表格
+  if (inTable && tableRows.length > 0) {
+    elements.push(renderTable(tableRows))
+  }
+
+  return <div className="text-sm leading-6 space-y-0.5">{elements}</div>
+}
+
+function renderTable(rows: string[][]) {
+  if (rows.length === 0) return null
+  const headers = rows[0]
+  const data = rows.slice(1)
+  return (
+    <div key={`tbl-${Math.random()}`} className="my-2 overflow-x-auto">
+      <table className="w-full text-xs border-collapse">
+        <thead>
+          <tr className="border-b border-gray-200">
+            {headers.map((h, i) => <th key={i} className="text-left py-1.5 px-2 font-semibold text-gray-600 bg-gray-50 first:rounded-l last:rounded-r">{h}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((row, ri) => (
+            <tr key={ri} className="border-b border-gray-50 hover:bg-gray-50/50">
+              {row.map((cell, ci) => <td key={ci} className="py-1.5 px-2 text-gray-600">{cell}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function InlineText({ text }: { text: string }) {
+  // 处理 **bold**
+  const parts = text.split(/(\*\*[^*]+\*\*)/g)
+  return (
+    <p className="text-gray-700 leading-relaxed">
+      {parts.map((part, i) => {
+        if (part.startsWith('**') && part.endsWith('**')) {
+          return <strong key={i} className="font-semibold text-gray-900">{part.slice(2, -2)}</strong>
+        }
+        // 高亮 ¥数字
+        const priceHighlighted = part.replace(/\¥(\d+[.]?\d*)/g, '___PRICE_$1___')
+        const segments = priceHighlighted.split(/(___PRICE_\d+[.]?\d*___)/g)
+        return <span key={i}>{segments.map((seg, j) => {
+          const m = seg.match(/___PRICE_(\d+[.]?\d*)___/)
+          if (m) return <span key={j} className="text-indigo-600 font-semibold">¥{m[1]}</span>
+          return seg
+        })}</span>
+      })}
+    </p>
   )
 }
 
@@ -1053,7 +1173,7 @@ function ConclusionPanel({ conclusion }: { conclusion: NonNullable<Quote['diagno
         {conclusion.llm_summary && (
           <div className="mt-4 pt-3 border-t border-purple-100">
             <div className="text-xs text-gray-400 mb-1">LLM 摘要</div>
-            <p className="text-sm text-gray-600 leading-relaxed">{conclusion.llm_summary.slice(0, 400)}</p>
+            <FormattedThought text={conclusion.llm_summary.slice(0, 400)} />
           </div>
         )}
       </div>
@@ -1142,88 +1262,6 @@ function DecisionLogPanel({ entries }: { entries: any[] }) {
             </div>
           </div>
         ))}
-      </div>
-    </div>
-  )
-}
-
-function FeedbackModal({ step, onClose, onSubmit }: {
-  step: any
-  onClose: () => void
-  onSubmit: (feedback: any) => void
-}) {
-  const [feedbackType, setFeedbackType] = useState('agree')
-  const [additionalInfo, setAdditionalInfo] = useState('')
-  const [overrideReasoning, setOverrideReasoning] = useState('')
-
-  return (
-    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-[100]" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-[480px] max-h-[80vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-5">
-          <h3 className="text-lg font-bold text-gray-900">人工干预 - 注入反馈</h3>
-          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
-            <XCircle size={18} className="text-gray-400" />
-          </button>
-        </div>
-
-        <div className="bg-gray-50 rounded-lg p-3 mb-4 text-xs text-gray-500">
-          <span className="font-medium text-gray-600">当前步骤：</span>
-          {step?.type === 'reasoning' ? `推理轮次 ${step.round || '?'}` : step?.data?.step || ''}
-        </div>
-
-        <div className="space-y-4">
-          <div>
-            <label className="text-sm font-medium text-gray-700 mb-2 block">反馈类型</label>
-            <div className="grid grid-cols-3 gap-2">
-              {[
-                { value: 'agree', label: '同意', icon: CheckCircle, activeClass: 'border-emerald-500 bg-emerald-50 text-emerald-700' },
-                { value: 'modify', label: '修正', icon: AlertTriangle, activeClass: 'border-amber-500 bg-amber-50 text-amber-700' },
-                { value: 'override', label: '否决', icon: XCircle, activeClass: 'border-red-500 bg-red-50 text-red-700' },
-              ].map(opt => (
-                <button key={opt.value} onClick={() => setFeedbackType(opt.value)}
-                  className={`flex items-center justify-center gap-1.5 py-2 rounded-lg border text-sm font-medium transition-colors ${
-                    feedbackType === opt.value ? opt.activeClass : 'border-gray-200 text-gray-500 hover:bg-gray-50'
-                  }`}>
-                  <opt.icon size={13} />
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <label className="text-sm font-medium text-gray-700 mb-1.5 block">补充信息</label>
-            <textarea
-              value={additionalInfo}
-              onChange={e => setAdditionalInfo(e.target.value)}
-              placeholder="输入你认为 Agent 遗漏的信息或你的判断依据..."
-              rows={3}
-              className="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-200 resize-none"
-            />
-          </div>
-
-          <div>
-            <label className="text-sm font-medium text-gray-700 mb-1.5 block">修改推理（可选）</label>
-            <textarea
-              value={overrideReasoning}
-              onChange={e => setOverrideReasoning(e.target.value)}
-              placeholder="如果你不同意 Agent 的判断，请说明你的推理..."
-              rows={2}
-              className="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-200 resize-none"
-            />
-          </div>
-
-          <div className="flex gap-2 pt-1">
-            <button onClick={onClose}
-              className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors">
-              取消
-            </button>
-            <button onClick={() => onSubmit({ feedbackType, additionalInfo, overrideReasoning })}
-              className="flex-1 py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors">
-              提交反馈
-            </button>
-          </div>
-        </div>
       </div>
     </div>
   )
@@ -1389,4 +1427,37 @@ function getLatestFeedbackContext(decisionLog: DecisionLogEntry[] | undefined, s
   }
 
   return null
+}
+
+function exportReport(quote: Quote | null) {
+  if (!quote) return
+  const wb = XLSX.utils.book_new()
+  const data: any[][] = [
+    ['报价异常溯源报告'],
+    [''],
+    ['物料', quote.material_name, '供应商', quote.supplier_name],
+    ['报价', String(quote.supplier_quote), '偏离度', String(quote.deviation_score)],
+    ['级别', quote.severity_level, '状态', quote.status],
+    [''],
+  ]
+  if (quote.diagnosis_conclusion) {
+    data.push(['AI诊断结论', quote.diagnosis_conclusion.root_cause])
+    data.push(['诊断类别', quote.diagnosis_conclusion.cause_category])
+    data.push(['可信度', `${(quote.diagnosis_conclusion.confidence * 100).toFixed(0)}%`])
+    data.push([])
+  }
+  if (quote.supplier_profile?.available) {
+    data.push(['供应商信息'])
+    data.push(['采购次数', String(quote.supplier_profile.purchase_count)])
+    data.push(['历史偏离均值', `${quote.supplier_profile.avg_deviation_score}分`])
+    data.push([])
+  }
+  if (quote.peer_benchmark?.available) {
+    data.push(['同行对比'])
+    data.push(['同行均价', `¥${quote.peer_benchmark.peer_avg_price}`])
+    data.push(['溢价率', `${quote.peer_benchmark.current_premium_pct.toFixed(1)}%`])
+    data.push([])
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), '溯源报告')
+  XLSX.writeFile(wb, `溯源报告-${quote.material_name}-${quote.id.slice(0, 8)}.xlsx`)
 }

@@ -181,7 +181,7 @@ export default function ScenarioSelector({ onSelectScenario }: ScenarioSelectorP
             <div
               key={scenario.id}
               onClick={() => setSelectedId(scenario.id)}
-              className={`cursor-pointer rounded-2xl border-2 p-5 transition-all hover:shadow-md ${
+              className={`cursor-pointer rounded-xl border-2 p-6 transition-all hover:shadow-md ${
                 selectedId === scenario.id
                   ? `${scenario.bgColor} border-2`
                   : 'bg-white border-gray-100 hover:border-gray-300'

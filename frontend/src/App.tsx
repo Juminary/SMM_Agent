@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard'
 import QuoteList from './pages/QuoteList'
 import QuoteDetail from './pages/QuoteDetail'
 import ExecutionTrace from './pages/ExecutionTrace'
+import AnalysisProgress from './pages/AnalysisProgress'
 import NewQuote from './pages/NewQuote'
 import Stats from './pages/Stats'
 import Demo from './pages/Demo'
@@ -18,6 +19,7 @@ function App() {
           <Route path="/quotes/new" element={<NewQuote />} />
           <Route path="/quotes/:id" element={<QuoteDetail />} />
           <Route path="/quotes/:id/trace" element={<ExecutionTrace />} />
+          <Route path="/analysis/:id" element={<AnalysisProgress />} />
           <Route path="/stats" element={<Stats />} />
           <Route path="/demo" element={<Demo />} />
         </Routes>
