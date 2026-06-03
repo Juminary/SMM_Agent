@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo, useRef } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, Play, Pause, RotateCcw, SkipForward, SkipBack,
-  Brain, Activity, Wrench, ChevronRight, Lightbulb, User,
+  Brain, Activity, Wrench, ChevronRight, ChevronDown, ChevronUp, Lightbulb, User,
   Search, BarChart3, Globe, Clock, Target, TrendingUp,
   MessageSquare, AlertTriangle, CheckCircle, XCircle,
   HelpCircle, Sparkles, GitBranch, BarChart2,
@@ -36,6 +36,21 @@ const PHASE_COLORS: Record<string, string> = {
   diagnosis: '#f59e0b',
   fast_pass: '#10b981',
   resolution: '#3b82f6',
+}
+
+/** 去除 Markdown 标记，提取纯文本摘要 */
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/^#{1,6}\s*/gm, '')       // 移除 ## / ### 标题标记
+    .replace(/\*\*(.+?)\*\*/g, '$1')    // **bold** → bold
+    .replace(/`([^`]+)`/g, '$1')        // `code` → code
+    .replace(/^[-*]\s+/gm, '')          // - 列表标记
+    .replace(/^\|\s*/gm, '')            // 表格行起始 |
+    .replace(/\|\s*$/gm, '')            // 表格行结束 |
+    .replace(/\|/g, ' · ')              // 表格列分隔符 → ·
+    .replace(/---+/g, '')               // --- 分隔线
+    .replace(/\n{3,}/g, '\n\n')         // 压缩多余空行
+    .trim()
 }
 
 type DisplayStep = { type: 'baseline' | 'reasoning'; round?: number; data: TraceStep }
@@ -647,9 +662,15 @@ function TaskGuideCard({
         <div className="text-sm font-medium text-gray-800">
           {currentStep?.data.step || '尚未选中步骤'}
         </div>
-        <p className="text-xs text-gray-500 mt-1 leading-relaxed">
-          {currentStep?.data.output?.slice(0, 120) || '点击时间线中的任意步骤，再进行反馈或 Override，这样动作会明确挂到具体证据节点上。'}
-        </p>
+        {currentStep?.data.output ? (
+          <div className="mt-1 text-xs leading-relaxed">
+            <FormattedThought text={currentStep.data.output.slice(0, 280)} />
+          </div>
+        ) : (
+          <p className="text-xs text-gray-500 mt-1 leading-relaxed">
+            点击时间线中的任意步骤，再进行反馈或 Override，这样动作会明确挂到具体证据节点上。
+          </p>
+        )}
       </div>
     </div>
   )
@@ -837,8 +858,8 @@ function TimelineStep({ step, isActive, isPast, onClick, onOverride, simpleView 
 
       {/* Conclusion */}
       {data.conclusion_from_step && (
-        <div className="text-xs text-emerald-700 bg-emerald-50 rounded px-2.5 py-1.5 border border-emerald-100">
-          ← {data.conclusion_from_step.slice(0, 120)}
+        <div className="text-xs text-emerald-700 bg-emerald-50 rounded px-2.5 py-1.5 border border-emerald-100 mt-2 leading-relaxed">
+          {stripMarkdown(data.conclusion_from_step.slice(0, 180))}
         </div>
       )}
     </div>
@@ -952,6 +973,12 @@ function FormattedThought({ text }: { text: string }) {
     // 空行
     if (!line.trim()) continue
 
+    // --- 分隔线
+    if (/^-{3,}$/.test(line.trim())) {
+      elements.push(<hr key={`hr-${i}`} className="my-2 border-gray-200" />)
+      continue
+    }
+
     // ## 标题
     if (line.startsWith('## ')) {
       elements.push(<h2 key={`h2-${i}`} className="text-sm font-bold text-gray-800 mt-3 mb-1">{line.replace('## ', '')}</h2>)
@@ -1055,9 +1082,9 @@ function StepDetailPanel({ step, onClose, onOverride }: {
         {(detail.output || detail.conclusion_from_step) && (
           <div className="rounded-xl border border-gray-200 p-3">
             <div className="text-xs text-gray-400 mb-1">核心输出</div>
-            <p className="text-sm text-gray-700 leading-relaxed">
-              {(detail.conclusion_from_step || detail.output || '').slice(0, 220)}
-            </p>
+            <div className="text-sm text-gray-700 leading-relaxed">
+              <FormattedThought text={(detail.conclusion_from_step || detail.output || '').slice(0, 500)} />
+            </div>
           </div>
         )}
         <details className="rounded-xl border border-gray-200 overflow-hidden">
@@ -1183,9 +1210,18 @@ function ConclusionPanel({ conclusion }: { conclusion: NonNullable<Quote['diagno
 
 function DecisionLogPanel({ entries }: { entries: any[] }) {
   const [expanded, setExpanded] = useState(false)
+  const [expandedReason, setExpandedReason] = useState<Set<number>>(new Set())
   const displayEntries = expanded ? entries : entries.slice(-3)
 
   if (!entries || entries.length === 0) return null
+
+  const toggleReason = (i: number) => {
+    setExpandedReason(prev => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i); else next.add(i)
+      return next
+    })
+  }
 
   return (
     <div className="bg-white rounded-2xl border shadow-sm">
@@ -1200,68 +1236,100 @@ function DecisionLogPanel({ entries }: { entries: any[] }) {
         {entries.length > 3 && (
           <button
             onClick={() => setExpanded(!expanded)}
-            className="text-xs text-indigo-500 hover:text-indigo-600 font-medium"
+            className="text-xs text-indigo-500 hover:text-indigo-600 font-medium flex items-center gap-1"
           >
             {expanded ? '收起' : `查看全部 ${entries.length} 步`}
+            {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
           </button>
         )}
       </div>
-      <div className="p-4 space-y-3">
-        {displayEntries.map((entry: any, i: number) => (
-          <div key={i} className="flex gap-3">
-            {/* Timeline connector */}
-            <div className="flex flex-col items-center">
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold ${
-                entry.chosen_action === 'approve' || entry.chosen_action === 'accept' || entry.chosen_action === 'approved'
-                  ? 'bg-emerald-500'
-                  : entry.source === 'human'
-                  ? 'bg-blue-500'
-                  : 'bg-violet-500'
-              }`}>
-                {entry.source === 'human' ? 'H' : 'AI'}
-              </div>
-              {i < displayEntries.length - 1 && (
-                <div className="w-0.5 flex-1 bg-gray-200 my-1" />
-              )}
-            </div>
-            {/* Content */}
-            <div className="flex-1 pb-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-gray-700">
-                  {entry.decision_point}
-                </span>
-                <span className="text-[10px] text-gray-400 font-mono">
-                  {entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : ''}
-                </span>
-              </div>
-              <div className="flex items-center gap-2 mt-1">
-                <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-gray-100 text-gray-600">
-                  {entry.chosen_action}
-                </span>
-                {entry.is_override && (
-                  <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-orange-100 text-orange-600">
-                    Override
-                  </span>
-                )}
-                {entry.confidence != null && entry.source !== 'human' && (
-                  <span className="text-[10px] text-gray-400">
-                    {(entry.confidence * 100).toFixed(0)}%
-                  </span>
+      <div className="p-4 space-y-4">
+        {displayEntries.map((entry: any, i: number) => {
+          const isHuman = entry.source === 'human'
+          const isExpanded = expandedReason.has(i)
+
+          return (
+            <div key={i} className="flex gap-3">
+              {/* Timeline connector */}
+              <div className="flex flex-col items-center">
+                <div className={`w-7 h-7 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-sm ${
+                  isHuman ? 'bg-blue-500' : entry.chosen_action?.includes('approve') || entry.chosen_action === 'accept'
+                    ? 'bg-emerald-500' : 'bg-violet-500'
+                }`}>
+                  {isHuman ? 'H' : 'AI'}
+                </div>
+                {i < displayEntries.length - 1 && (
+                  <div className="w-0.5 flex-1 bg-gray-100 my-1.5" />
                 )}
               </div>
-              {entry.reasoning && (
-                <p className="text-xs text-gray-500 mt-1 leading-relaxed line-clamp-3">
-                  {entry.reasoning}
-                </p>
-              )}
-              {entry.override_reasoning && (
-                <p className="text-xs text-orange-600 mt-1 italic">
-                  人工修正: {entry.override_reasoning.slice(0, 200)}
-                </p>
-              )}
+              {/* Content */}
+              <div className="flex-1 min-w-0 pb-2">
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    {entry.decision_point && (
+                      <span className="text-xs font-bold text-gray-800">
+                        {isHuman ? '👤 人工反馈' : entry.decision_point}
+                      </span>
+                    )}
+                    {!isHuman && entry.confidence != null && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                        entry.confidence >= 0.8 ? 'bg-emerald-100 text-emerald-700' :
+                        entry.confidence >= 0.6 ? 'bg-amber-100 text-amber-700' :
+                        'bg-red-100 text-red-600'
+                      }`}>
+                        {(entry.confidence * 100).toFixed(0)}%
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-gray-400 font-mono">
+                    {entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''}
+                  </span>
+                </div>
+
+                {/* Tool chips */}
+                <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
+                  {entry.chosen_action && entry.chosen_action.split(', ').map((action: string, j: number) => {
+                    const label = SIMPLE_LABELS[action] || action
+                    return (
+                      <span key={j} className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md bg-gray-100 text-gray-600 font-medium">
+                        {label}
+                      </span>
+                    )
+                  })}
+                  {entry.is_override && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-orange-100 text-orange-600 font-medium">
+                      Override
+                    </span>
+                  )}
+                </div>
+
+                {/* Reasoning (expandable) */}
+                {entry.reasoning && (
+                  <div className="mt-1">
+                    <button
+                      onClick={() => toggleReason(i)}
+                      className="flex items-center gap-1 text-[10px] text-indigo-500 hover:text-indigo-600 font-medium"
+                    >
+                      {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                      {isExpanded ? '收起推理' : '展开推理'}
+                    </button>
+                    {isExpanded && (
+                      <div className="mt-1.5 p-2.5 bg-gray-50 rounded-lg border border-gray-100 text-xs text-gray-600 leading-relaxed">
+                        <FormattedThought text={entry.reasoning} />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {entry.override_reasoning && (
+                  <p className="text-[11px] text-orange-600 mt-1 italic leading-relaxed">
+                    人工修正: {entry.override_reasoning.slice(0, 200)}
+                  </p>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )

@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, CheckCircle, Brain, FileSpreadsheet,
-  Loader2, MessageSquare, Target,
+  Loader2, Target,
   Package, XCircle, ArrowUp, ArrowDown, Settings,
+  ChevronDown, ChevronUp, ChevronRight, Clock, GitBranch,
+  Search, BarChart3, Globe, User, Wrench, Lightbulb, TrendingUp, AlertCircle,
 } from 'lucide-react'
 import { fetchQuote, selectQuoteSolution, submitDecision } from '../utils/api'
-import type { Quote, Solution, CostItem, DiagnosisInvestigation } from '../types'
+import type { Quote, Solution, CostItem, DiagnosisInvestigation, DecisionLogEntry } from '../types'
 import OverrideModal from '../components/OverrideModal'
 import * as XLSX from 'xlsx'
 
@@ -30,6 +32,118 @@ const DIRECTION_CONFIG = {
 
 const SEVERITY_LABEL: Record<string, string> = {
   '紧急': '需立即处理', '警示': '建议尽快处理', '关注': '可观察', '正常': '无需处理',
+}
+
+// ═══ 诊断工具名称 → 中文标签 ═══
+const TOOL_LABELS: Record<string, string> = {
+  'tool_get_supplier_profile': '供应商历史',
+  'tool_compare_peer_price': '同行价格对比',
+  'tool_check_market_trend': '市场行情分析',
+  'tool_search_market_price': '实时市场价格',
+  'tool_check_urgency': '库存紧急度',
+  'tool_search_alternatives': '替代供应商',
+  'tool_analyze_cost_anomaly': '成本异常分析',
+  'tool_generate_solutions': '方案生成',
+  'tool_predict_price_range': '价格预测',
+  'tool_analyze_cost_structure': '成本拆解',
+  'tool_match_similar_material': '历史对比',
+  'tool_score_deviation': '异常评分',
+}
+
+const TOOL_ICONS: Record<string, any> = {
+  'tool_get_supplier_profile': User,
+  'tool_compare_peer_price': BarChart3,
+  'tool_check_market_trend': Globe,
+  'tool_search_market_price': Globe,
+  'tool_check_urgency': Clock,
+  'tool_search_alternatives': Search,
+  'tool_analyze_cost_anomaly': Wrench,
+  'tool_generate_solutions': Lightbulb,
+  'tool_predict_price_range': Target,
+  'tool_analyze_cost_structure': Wrench,
+  'tool_match_similar_material': Search,
+  'tool_score_deviation': TrendingUp,
+}
+
+/** 时间戳格式化 */
+function fmtTime(ts: string | undefined | null): string {
+  if (!ts) return ''
+  try { return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }
+  catch { return ts }
+}
+
+/** 置信度 → 颜色 */
+function confColor(c: number | undefined | null): string {
+  if (c == null) return 'text-gray-400'
+  if (c >= 0.8) return 'text-emerald-600'
+  if (c >= 0.6) return 'text-amber-600'
+  return 'text-red-500'
+}
+
+function confBg(c: number | undefined | null): string {
+  if (c == null) return 'bg-gray-100'
+  if (c >= 0.8) return 'bg-emerald-100'
+  if (c >= 0.6) return 'bg-amber-100'
+  return 'bg-red-100'
+}
+
+/** 简单的 Markdown 渲染（支持 ## / ** / - 列表） */
+function SimpleMarkdown({ text }: { text: string }) {
+  if (!text) return null
+  const lines = text.split('\n')
+  const elements: JSX.Element[] = []
+  let listItems: string[] = []
+
+  const flushList = (key: string) => {
+    if (listItems.length > 0) {
+      elements.push(
+        <ul key={key} className="list-disc list-inside space-y-0.5">
+          {listItems.map((item, i) => (
+            <li key={`${key}-li-${i}`} className="text-xs text-gray-600">{item}</li>
+          ))}
+        </ul>
+      )
+      listItems = []
+    }
+  }
+
+  lines.forEach((line, i) => {
+    const trimmed = line.trim()
+    const key = `md-${i}`
+
+    if (!trimmed) { flushList(key); return }
+
+    // ## 标题
+    if (trimmed.startsWith('## ')) {
+      flushList(key)
+      elements.push(
+        <div key={key} className="text-xs font-bold text-gray-800 mt-2 mb-1">{trimmed.replace(/^##\s*/, '')}</div>
+      )
+      return
+    }
+    // ### 标题
+    if (trimmed.startsWith('### ')) {
+      flushList(key)
+      elements.push(
+        <div key={key} className="text-[11px] font-semibold text-gray-700 mt-1.5 mb-0.5">{trimmed.replace(/^###\s*/, '')}</div>
+      )
+      return
+    }
+    // - 列表
+    if (trimmed.startsWith('- ')) {
+      listItems.push(trimmed.replace(/^-\s*/, '').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'))
+      return
+    }
+    // 普通段落（处理 **bold**）
+    flushList(key)
+    const html = trimmed.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    elements.push(
+      <p key={key} className="text-xs text-gray-600 leading-relaxed" dangerouslySetInnerHTML={{ __html: html }} />
+    )
+  })
+  flushList('end')
+
+  return <div className="space-y-0.5">{elements}</div>
 }
 
 export default function QuoteDetail() {
@@ -316,17 +430,73 @@ export default function QuoteDetail() {
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
             <div className="flex items-center gap-2 mb-3 text-sm font-semibold text-gray-700">
               <Brain size={14} /> 诊断推理
+              {quote.diagnosis_conclusion?.confidence != null && (
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${confBg(quote.diagnosis_conclusion.confidence)} ${confColor(quote.diagnosis_conclusion.confidence)}`}>
+                  综合置信度 {(quote.diagnosis_conclusion.confidence * 100).toFixed(0)}%
+                </span>
+              )}
             </div>
             {quote.diagnosis_investigations && quote.diagnosis_investigations.length > 0 ? (
-              <div className="space-y-1.5">
-                {quote.diagnosis_investigations.slice(0, 3).map((inv: DiagnosisInvestigation) => (
-                  <div key={inv.step} className="text-xs border-l-2 border-blue-200 pl-2 py-1">
-                    <span className="text-blue-600 font-medium text-[10px]">{inv.tool}</span>
-                    <p className="text-gray-500 mt-0.5">{inv.result_summary?.slice(0, 60)}</p>
-                  </div>
-                ))}
+              <div className="space-y-2">
+                {/* 调查步骤表格 */}
+                <div className="overflow-hidden rounded-lg border border-gray-200">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-200">
+                        <th className="text-left px-3 py-2 font-medium text-gray-500 w-8">#</th>
+                        <th className="text-left px-3 py-2 font-medium text-gray-500">分析工具</th>
+                        <th className="text-center px-2 py-2 font-medium text-gray-500 w-20">置信度</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {quote.diagnosis_investigations.map((inv: DiagnosisInvestigation) => {
+                        const Icon = TOOL_ICONS[inv.tool] || AlertCircle
+                        const label = TOOL_LABELS[inv.tool] || inv.tool
+                        return (
+                          <tr key={inv.step} className="hover:bg-gray-50 transition-colors">
+                            <td className="px-3 py-2.5 text-gray-400 font-mono">{inv.step}</td>
+                            <td className="px-3 py-2.5">
+                              <div className="flex items-center gap-1.5">
+                                <Icon size={12} className="text-indigo-400 shrink-0" />
+                                <span className="font-medium text-gray-700">{label}</span>
+                              </div>
+                              {inv.result_summary && (
+                                <p className="text-[11px] text-gray-400 mt-0.5 line-clamp-2 leading-relaxed">
+                                  {inv.result_summary.slice(0, 120)}
+                                </p>
+                              )}
+                            </td>
+                            <td className="px-2 py-2.5 text-center">
+                              <span className={`inline-block text-[10px] px-1.5 py-0.5 rounded-full font-medium ${confBg(inv.confidence)} ${confColor(inv.confidence)}`}>
+                                {(inv.confidence * 100).toFixed(0)}%
+                              </span>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* 诊断结论 */}
                 {quote.diagnosis_conclusion && (
-                  <div className="mt-2 text-xs font-medium text-purple-700">→ {quote.diagnosis_conclusion.root_cause?.slice(0, 50)}</div>
+                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                    <div className="flex items-start gap-2">
+                      <Lightbulb size={14} className="text-purple-500 mt-0.5 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-semibold text-purple-800 mb-0.5">
+                          根因分析：{quote.diagnosis_conclusion.root_cause}
+                        </div>
+                        {quote.diagnosis_conclusion.cause_category && (
+                          <span className="inline-block text-[10px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 font-medium">
+                            {quote.diagnosis_conclusion.cause_category === 'supplier_premium' ? '供应商溢价' :
+                             quote.diagnosis_conclusion.cause_category === 'market_trend' ? '市场行情' :
+                             quote.diagnosis_conclusion.cause_category === 'insufficient_data' ? '数据不足' : quote.diagnosis_conclusion.cause_category}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             ) : (
@@ -335,20 +505,9 @@ export default function QuoteDetail() {
           </div>
         </div>
 
+        {/* ═══ AI 决策时间线 ═══ */}
         {quote.decision_log && quote.decision_log.length > 0 && (
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
-              <MessageSquare size={14} className="text-gray-400" /> 操作记录（{quote.decision_log.length}）
-            </h3>
-            <div className="space-y-1.5">
-              {[...quote.decision_log].slice(-5).reverse().map((entry: any, i: number) => (
-                <div key={i} className="flex items-start gap-2 text-xs text-gray-600 border-l-2 border-gray-200 pl-3 py-1">
-                  <span className="font-medium shrink-0">{entry.source === 'human' ? '👤' : '🤖'}</span>
-                  <span className="text-gray-500">{entry.chosen_action} · {(entry.reasoning || '').slice(0, 80)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
+          <DecisionTimeline entries={quote.decision_log} />
         )}
       </div>
 
@@ -463,6 +622,134 @@ function PriceScale({ quote: q, predictionLow, predictionMid, predictionHigh, ma
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════
+// AI 决策时间线组件
+// ═══════════════════════════════════════════════════════
+
+function DecisionTimeline({ entries }: { entries: DecisionLogEntry[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const [expandedReason, setExpandedReason] = useState<Set<number>>(new Set())
+  const displayEntries = expanded ? entries : entries.slice(-3)
+
+  const toggleReason = (i: number) => {
+    setExpandedReason(prev => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i); else next.add(i)
+      return next
+    })
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
+        <div className="flex items-center gap-2">
+          <GitBranch size={14} className="text-violet-500" />
+          <h3 className="text-sm font-semibold text-gray-700">AI 决策时间线</h3>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-600 font-medium">
+            {entries.length} 步
+          </span>
+        </div>
+        {entries.length > 3 && (
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="text-xs text-indigo-500 hover:text-indigo-600 font-medium flex items-center gap-1"
+          >
+            {expanded ? '收起' : `查看全部 ${entries.length} 步`}
+            {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
+        )}
+      </div>
+      <div className="p-4 space-y-4">
+        {displayEntries.map((entry: DecisionLogEntry, i: number) => {
+          const isHuman = entry.source === 'human'
+          const isExpanded = expandedReason.has(i)
+
+          return (
+            <div key={i} className="flex gap-3">
+              {/* 时间线连接器 */}
+              <div className="flex flex-col items-center">
+                <div className={`w-7 h-7 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-sm ${
+                  isHuman ? 'bg-blue-500' : entry.chosen_action?.includes('approve') || entry.chosen_action === 'accept'
+                    ? 'bg-emerald-500' : 'bg-violet-500'
+                }`}>
+                  {isHuman ? 'H' : 'AI'}
+                </div>
+                {i < displayEntries.length - 1 && <div className="w-0.5 flex-1 bg-gray-100 my-1.5" />}
+              </div>
+
+              {/* 内容 */}
+              <div className="flex-1 min-w-0 pb-2">
+                {/* 标题行：决策点 + 时间 */}
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    {entry.decision_point && (
+                      <span className="text-xs font-bold text-gray-800">
+                        {isHuman ? '👤 人工反馈' : entry.decision_point}
+                      </span>
+                    )}
+                    {!isHuman && entry.confidence != null && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${confBg(entry.confidence)} ${confColor(entry.confidence)}`}>
+                        {(entry.confidence * 100).toFixed(0)}%
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-gray-400 font-mono">
+                    {fmtTime(entry.timestamp)}
+                  </span>
+                </div>
+
+                {/* 工具名/动作 */}
+                <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
+                  {entry.chosen_action && entry.chosen_action.split(', ').map((action: string, j: number) => {
+                    const label = TOOL_LABELS[action] || action
+                    const Icon = TOOL_ICONS[action]
+                    return (
+                      <span key={j} className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md bg-gray-100 text-gray-600 font-medium">
+                        {Icon && <Icon size={10} className="text-gray-400" />}
+                        {label}
+                      </span>
+                    )
+                  })}
+                  {entry.is_override && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-orange-100 text-orange-600 font-medium">
+                      Override
+                    </span>
+                  )}
+                </div>
+
+                {/* 推理内容 */}
+                {entry.reasoning && (
+                  <div className="mt-1">
+                    <button
+                      onClick={() => toggleReason(i)}
+                      className="flex items-center gap-1 text-[10px] text-indigo-500 hover:text-indigo-600 font-medium"
+                    >
+                      {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                      {isExpanded ? '收起推理' : '展开推理'}
+                    </button>
+                    {isExpanded && (
+                      <div className="mt-1.5 p-2.5 bg-gray-50 rounded-lg border border-gray-100">
+                        <SimpleMarkdown text={entry.reasoning} />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 人工修正 */}
+                {entry.override_reasoning && (
+                  <p className="text-[11px] text-orange-600 mt-1 italic leading-relaxed">
+                    人工修正：{entry.override_reasoning.slice(0, 200)}
+                  </p>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
