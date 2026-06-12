@@ -555,6 +555,17 @@ def node_execute_diagnostic_tool(state: AgentState, registry: ToolRegistry) -> A
         if tool_name == "tool_check_urgency":
             args["material_name"] = state["quote_data"].get("material_name", "")
             args["category"] = state["quote_data"].get("category", "")
+        if tool_name == "tool_generate_solutions":
+            args["quantity"] = state["quote_data"].get("quantity", 0)
+            args["supplier_profile"] = state.get("supplier_profile", {})
+            args["inventory_context"] = state.get("inventory_context", {})
+            args["peer_benchmark"] = state.get("peer_benchmark", {})
+            args["market_context"] = state.get("market_context", {})
+            args["alternatives"] = state.get("alternatives", [])
+            args["cost_analysis"] = state.get("cost_analysis", {})
+            pred = state.get("prediction") or {}
+            args["ai_prediction_mid"] = pred.get("p50")
+            args["ai_prediction_high"] = pred.get("p90")
 
         try:
             tool = registry.get(tool_name)
@@ -687,6 +698,15 @@ def node_conclude_diagnosis(state: AgentState, registry: ToolRegistry) -> AgentS
                 severity_level=dev.get("severity_level", "正常"),
                 deviation_details=dev,
                 similar_materials=sims,
+                quantity=qd.get("quantity", 0),
+                supplier_profile=state.get("supplier_profile", {}),
+                inventory_context=state.get("inventory_context", {}),
+                peer_benchmark=state.get("peer_benchmark", {}),
+                market_context=state.get("market_context", {}),
+                alternatives=state.get("alternatives", []),
+                cost_analysis=state.get("cost_analysis", {}),
+                ai_prediction_mid=(state.get("prediction") or {}).get("p50"),
+                ai_prediction_high=(state.get("prediction") or {}).get("p90"),
             )
             state["solutions"] = out.get("result") or []
             _append_trace(
@@ -734,10 +754,19 @@ def _derive_root_cause(state: AgentState) -> str:
     market = state.get("market_context") or {}
     peer = state.get("peer_benchmark") or {}
     dev = state.get("deviation") or {}
+    cost = state.get("cost_analysis") or {}
 
     supplier_available = supplier.get("available", False)
     market_available = market.get("available", False)
     peer_available = peer.get("available", False)
+    anomaly_count = cost.get("anomaly_count", 0)
+
+    if anomaly_count >= 2 and dev.get("cost_deviation", 0) >= 25:
+        return (
+            f"成本结构异常：发现 {anomaly_count} 个异常成本项，"
+            f"成本偏离 {dev.get('cost_deviation', 0):.0f}%，"
+            "建议优先核实原材料、工艺或利润加成假设。"
+        )
 
     # 有供应商画像 + 有同行对比 → 最可靠
     if supplier_available and peer_available:
@@ -784,12 +813,15 @@ def _derive_cause_category(state: AgentState) -> str:
     supplier = state.get("supplier_profile") or {}
     market = state.get("market_context") or {}
     peer = state.get("peer_benchmark") or {}
+    cost = state.get("cost_analysis") or {}
 
-    if peer.get("current_premium_pct", 0) > 15:
+    if cost.get("anomaly_count", 0) >= 2:
+        return "cost_structure_anomaly"
+    elif peer.get("current_premium_pct", 0) > 15:
         return "supplier_premium"
     elif market.get("available"):
         return "market_trend"
-    elif supplier.get("quote_count", 0) < 3:
+    elif (supplier.get("purchase_count", 0) + supplier.get("analyzed_quotes", 0)) < 3:
         return "insufficient_data"
     else:
         return "unknown_anomaly"

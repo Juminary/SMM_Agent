@@ -12,6 +12,8 @@ from app.db.database import (
     init_db, get_db,
     insert_material, insert_quote,
     get_all_materials,
+    DEFAULT_INDUSTRY_BENCHMARKS,
+    upsert_industry_benchmarks,
 )
 
 # 项目根目录
@@ -54,23 +56,15 @@ def migrate_from_json():
                 )
             print(f"  ✓ external_references: {len(data.get('external_references', []))} 条")
 
+            merged_benchmarks = {}
             for key, bench in data.get("industry_benchmarks", {}).items():
-                conn.execute(
-                    """INSERT OR REPLACE INTO industry_benchmarks
-                       (benchmark_key, category_label, raw_material_pct, processing_pct,
-                        surface_treatment_pct, packaging_pct, management_profit_pct)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        key,
-                        "",
-                        bench.get("raw_material_pct", 0),
-                        bench.get("processing_pct", 0),
-                        bench.get("surface_treatment_pct", 0),
-                        bench.get("packaging_pct", 0),
-                        bench.get("management_profit_pct", 0),
-                    ),
-                )
-            print(f"  ✓ industry_benchmarks: {len(data.get('industry_benchmarks', {}))} 条")
+                merged_benchmarks[key] = {
+                    **DEFAULT_INDUSTRY_BENCHMARKS.get(key, {}),
+                    **bench,
+                }
+            if merged_benchmarks:
+                upsert_industry_benchmarks(conn, merged_benchmarks)
+            print(f"  ✓ industry_benchmarks: {len(merged_benchmarks)} 条")
 
         # 3. 迁移报价数据（如果有）
         quotes_path = os.path.join(DATA_DIR, "quotes.json")

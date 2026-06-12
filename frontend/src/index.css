@@ -175,3 +175,9 @@ html, body {
 button, a, input, select, textarea {
   transition: all 0.15s ease;
 }
+
+@layer components {
+  .field-label {
+    @apply mb-1.5 block text-xs font-semibold text-slate-500;
+  }
+}

@@ -23,6 +23,74 @@ DATABASE_URL = os.environ.get(
 )
 
 
+DEFAULT_INDUSTRY_BENCHMARKS: Dict[str, Dict[str, Any]] = {
+    "plastic_injection": {
+        "category_label": "塑料外壳/注塑件",
+        "raw_material_pct": 40,
+        "processing_pct": 25,
+        "surface_treatment_pct": 10,
+        "packaging_pct": 5,
+        "management_profit_pct": 20,
+    },
+    "pcb": {
+        "category_label": "PCB板",
+        "raw_material_pct": 22,
+        "processing_pct": 48,
+        "surface_treatment_pct": 20,
+        "packaging_pct": 3,
+        "management_profit_pct": 7,
+    },
+    "sensor": {
+        "category_label": "传感器模组",
+        "raw_material_pct": 50,
+        "processing_pct": 25,
+        "surface_treatment_pct": 0,
+        "packaging_pct": 5,
+        "management_profit_pct": 20,
+    },
+    "silicone": {
+        "category_label": "按键/硅胶件",
+        "raw_material_pct": 42,
+        "processing_pct": 28,
+        "surface_treatment_pct": 0,
+        "packaging_pct": 8,
+        "management_profit_pct": 22,
+    },
+    "cuff": {
+        "category_label": "袖带/软包缝制件",
+        "raw_material_pct": 42,
+        "processing_pct": 30,
+        "surface_treatment_pct": 0,
+        "packaging_pct": 8,
+        "management_profit_pct": 20,
+    },
+    "display_module": {
+        "category_label": "显示屏模组",
+        "raw_material_pct": 58,
+        "processing_pct": 18,
+        "surface_treatment_pct": 8,
+        "packaging_pct": 4,
+        "management_profit_pct": 12,
+    },
+    "battery_pack": {
+        "category_label": "电池/电源组件",
+        "raw_material_pct": 68,
+        "processing_pct": 12,
+        "surface_treatment_pct": 0,
+        "packaging_pct": 5,
+        "management_profit_pct": 15,
+    },
+    "metal_connector": {
+        "category_label": "连接器/冲压五金",
+        "raw_material_pct": 46,
+        "processing_pct": 26,
+        "surface_treatment_pct": 10,
+        "packaging_pct": 6,
+        "management_profit_pct": 12,
+    },
+}
+
+
 def _is_sqlite() -> bool:
     return DATABASE_URL.startswith("sqlite")
 
@@ -285,6 +353,7 @@ def init_db():
     conn = get_connection()
     try:
         conn.executescript(SCHEMA_SQL)
+        ensure_default_benchmarks(conn)
         conn.commit()
     finally:
         conn.close()
@@ -663,6 +732,7 @@ def get_all_benchmarks(conn) -> Dict[str, Dict[str, Any]]:
     rows = conn.execute("SELECT * FROM industry_benchmarks").fetchall()
     return {
         row["benchmark_key"]: {
+            "category_label": row["category_label"],
             "raw_material_pct": row["raw_material_pct"],
             "processing_pct": row["processing_pct"],
             "surface_treatment_pct": row["surface_treatment_pct"],
@@ -671,6 +741,43 @@ def get_all_benchmarks(conn) -> Dict[str, Dict[str, Any]]:
         }
         for row in rows
     }
+
+
+def upsert_industry_benchmarks(
+    conn,
+    benchmarks: Dict[str, Dict[str, Any]],
+) -> int:
+    """批量写入行业基准，兼容原始 JSON 和默认配置。"""
+    count = 0
+    for key, bench in benchmarks.items():
+        conn.execute(
+            """INSERT OR REPLACE INTO industry_benchmarks
+               (benchmark_key, category_label, raw_material_pct, processing_pct,
+                surface_treatment_pct, packaging_pct, management_profit_pct, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+            (
+                key,
+                bench.get("category_label", ""),
+                bench.get("raw_material_pct", 0),
+                bench.get("processing_pct", 0),
+                bench.get("surface_treatment_pct", 0),
+                bench.get("packaging_pct", 0),
+                bench.get("management_profit_pct", 0),
+            ),
+        )
+        count += 1
+    return count
+
+
+def ensure_default_benchmarks(conn) -> int:
+    """当库中缺少行业基准时自动补齐默认值。"""
+    row = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM industry_benchmarks"
+    ).fetchone()
+    count = int(row["cnt"]) if row and row["cnt"] is not None else 0
+    if count > 0:
+        return 0
+    return upsert_industry_benchmarks(conn, DEFAULT_INDUSTRY_BENCHMARKS)
 
 
 # ---- Supplier Profiles ----

@@ -168,6 +168,8 @@ def seed(seed_val: int = 42, reset: bool = False):
                 conn.execute("DELETE FROM industry_benchmarks")
                 conn.execute("DELETE FROM raw_material_prices")
                 conn.execute("DELETE FROM processing_rates")
+                conn.execute("DELETE FROM inventory")
+                conn.execute("DELETE FROM supplier_profiles")
                 conn.commit()
                 print("已清空旧数据")
 
@@ -194,6 +196,10 @@ def seed(seed_val: int = 42, reset: bool = False):
             # 5. 外部参考
             n_ext = generate_external_references(conn)
             print(f"  ✓ 外部参考: {n_ext} 条")
+
+            # 5.2 行业成本基准
+            n_bench = generate_industry_benchmarks(conn)
+            print(f"  ✓ 行业基准: {n_bench} 条")
 
             # 5.5 库存
             n_inv = generate_inventory(conn, materials_count=n_materials)
@@ -446,6 +452,16 @@ def generate_external_references(conn) -> int:
         )
     conn.commit()
     return len(EXTERNAL_MARKET_DATA)
+
+
+def generate_industry_benchmarks(conn) -> int:
+    """写入默认行业成本基准，保证成本拆解可用。"""
+    from app.db.database import DEFAULT_INDUSTRY_BENCHMARKS, upsert_industry_benchmarks
+
+    conn.execute("DELETE FROM industry_benchmarks")
+    count = upsert_industry_benchmarks(conn, DEFAULT_INDUSTRY_BENCHMARKS)
+    conn.commit()
+    return count
 
 
 def generate_inventory(conn, materials_count: int = 500) -> int:

@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
+import ProcurementFlow from './pages/ProcurementFlow'
 import QuoteList from './pages/QuoteList'
 import QuoteDetail from './pages/QuoteDetail'
 import ExecutionTrace from './pages/ExecutionTrace'
@@ -14,7 +15,9 @@ function App() {
     <BrowserRouter>
       <Layout>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/" element={<ProcurementFlow />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/procurement" element={<ProcurementFlow />} />
           <Route path="/quotes" element={<QuoteList />} />
           <Route path="/quotes/new" element={<NewQuote />} />
           <Route path="/quotes/:id" element={<QuoteDetail />} />

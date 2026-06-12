@@ -182,7 +182,10 @@ export interface SupplierProfile {
   anomaly_count?: number
   anomaly_rate_pct?: number
   deviation_summary?: string
+  risk_level?: string
+  pricing_behavior?: string
   risk_assessment?: string
+  recommended_procurement_mode?: string
   first_order?: string
   last_order?: string
   sample_materials?: { name: string; price: number; date: string }[]

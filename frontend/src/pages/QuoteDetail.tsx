@@ -1,16 +1,17 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import {
-  ArrowLeft, CheckCircle, Brain, FileSpreadsheet,
+  ArrowLeft, CheckCircle, Brain, FileSpreadsheet, FileText,
   Loader2, Target,
   Package, XCircle, ArrowUp, ArrowDown, Settings,
   ChevronDown, ChevronUp, ChevronRight, Clock, GitBranch,
   Search, BarChart3, Globe, User, Wrench, Lightbulb, TrendingUp, AlertCircle,
 } from 'lucide-react'
 import { fetchQuote, selectQuoteSolution, submitDecision } from '../utils/api'
+import { exportQuotePdf } from '../utils/exportPdf'
+import { exportQuoteWorkbook } from '../utils/exportWorkbook'
 import type { Quote, Solution, CostItem, DiagnosisInvestigation, DecisionLogEntry } from '../types'
 import OverrideModal from '../components/OverrideModal'
-import * as XLSX from 'xlsx'
 
 // ── 判断是"偏高"还是"偏低" ──
 function getDeviationDirection(quote: Quote): 'high' | 'low' | 'normal' {
@@ -234,9 +235,13 @@ export default function QuoteDetail() {
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 bg-white">
               <Settings size={13} /> 高级
             </button>
-            <button onClick={() => exportExcel(quote)}
+            <button onClick={() => exportQuoteWorkbook(quote, 'detail')}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 bg-white">
-              <FileSpreadsheet size={13} /> 导出
+              <FileSpreadsheet size={13} /> 导出Excel
+            </button>
+            <button onClick={() => exportQuotePdf(quote, 'detail')}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-red-200 text-red-600 rounded-lg hover:bg-red-50 bg-white">
+              <FileText size={13} /> 导出PDF
             </button>
           </div>
         </div>
@@ -311,6 +316,32 @@ export default function QuoteDetail() {
           />
         </div>
 
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+            <div className="flex items-center gap-2 mb-3 text-sm font-semibold text-gray-700">
+              <User size={14} /> 供应商画像
+            </div>
+              <div className="space-y-2 text-sm">
+              <div className="flex justify-between"><span className="text-gray-400">风险等级</span><span className={`font-semibold ${riskLevelClass(quote.supplier_profile?.risk_level)}`}>{quote.supplier_profile?.risk_level || '待评估'}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">报价行为</span><span className="text-gray-600">{quote.supplier_profile?.pricing_behavior || '暂无'}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">异常率</span><span className="text-gray-600">{quote.supplier_profile?.anomaly_rate_pct != null ? `${quote.supplier_profile.anomaly_rate_pct}%` : '暂无'}</span></div>
+              <div className="pt-2 text-xs leading-5 text-gray-500 border-t border-gray-100">{quote.supplier_profile?.recommended_procurement_mode || quote.supplier_profile?.risk_assessment || '等待供应商画像补充建议'}</div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+            <div className="flex items-center gap-2 mb-3 text-sm font-semibold text-gray-700">
+              <Clock size={14} /> 库存约束
+            </div>
+              <div className="space-y-2 text-sm">
+              <div className="flex justify-between"><span className="text-gray-400">紧急度</span><span className={`font-semibold ${urgencyClass(quote.inventory_context?.urgency)}`}>{quote.inventory_context?.urgency || '未知'}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">库存窗口</span><span className="text-gray-600">{quote.inventory_context?.days_remaining != null ? `${quote.inventory_context.days_remaining}天` : '暂无'}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">可否议价</span><span className="text-gray-600">{formatNegotiateState(quote.inventory_context?.can_negotiate, quote.inventory_context?.available)}</span></div>
+              <div className="pt-2 text-xs leading-5 text-gray-500 border-t border-gray-100">{quote.inventory_context?.suggestion || '暂无库存建议'}</div>
+            </div>
+          </div>
+        </div>
+
         {/* ═══ 处理方案 ═══ */}
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-5 py-4 border-b border-gray-100">
@@ -342,13 +373,19 @@ export default function QuoteDetail() {
                             sol.action === 'accept' ? 'bg-emerald-100 text-emerald-700' :
                             sol.action === 'escalate' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'
                           }`}>
-                            {sol.action === 'accept' ? '直接通过' :
-                             sol.action === 'negotiate' ? '议价' :
-                             sol.action === 'requote' ? '询价' :
-                             sol.action === 'escalate' ? '升级审批' : sol.action}
+                            {formatSolutionAction(sol.action)}
                           </span>
                         </div>
                         <p className="text-xs text-gray-500 leading-5 line-clamp-2">{sol.description}</p>
+                        {buildSolutionSignals(sol, quote).length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {buildSolutionSignals(sol, quote).map(signal => (
+                              <span key={signal} className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-600">
+                                {signal}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </button>
                     )
                   })}
@@ -489,9 +526,7 @@ export default function QuoteDetail() {
                         </div>
                         {quote.diagnosis_conclusion.cause_category && (
                           <span className="inline-block text-[10px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 font-medium">
-                            {quote.diagnosis_conclusion.cause_category === 'supplier_premium' ? '供应商溢价' :
-                             quote.diagnosis_conclusion.cause_category === 'market_trend' ? '市场行情' :
-                             quote.diagnosis_conclusion.cause_category === 'insufficient_data' ? '数据不足' : quote.diagnosis_conclusion.cause_category}
+                            {formatCauseCategory(quote.diagnosis_conclusion.cause_category)}
                           </span>
                         )}
                       </div>
@@ -550,6 +585,73 @@ export default function QuoteDetail() {
       )}
     </div>
   )
+}
+
+function formatSolutionAction(action?: string) {
+  if (!action) return '待执行'
+  const map: Record<string, string> = {
+    accept: '直接通过',
+    negotiate: '议价',
+    requote: '二次询价',
+    escalate: '升级审批',
+    verify: '核验',
+    compare: '历史对比',
+    review_supplier: '供应商复核',
+    secure_supply: '保供采购',
+    secure_then_negotiate: '先保供后追价',
+  }
+  return map[action] || action
+}
+
+function formatCauseCategory(category?: string) {
+  const map: Record<string, string> = {
+    normal: '报价正常',
+    supplier_premium: '供应商溢价',
+    market_trend: '市场行情驱动',
+    cost_structure_anomaly: '成本结构异常',
+    insufficient_data: '数据不足',
+    unknown_anomaly: '待人工确认',
+  }
+  return map[category || ''] || category || '待确认'
+}
+
+function formatNegotiateState(canNegotiate?: boolean, available?: boolean) {
+  if (available === false || canNegotiate == null) return '待确认'
+  return canNegotiate ? '可以' : '不建议'
+}
+
+function urgencyClass(urgency?: string) {
+  if (urgency === '紧急') return 'text-red-600'
+  if (urgency === '关注') return 'text-amber-600'
+  if (urgency === '正常') return 'text-emerald-600'
+  return 'text-gray-900'
+}
+
+function riskLevelClass(level?: string) {
+  if (level === '极高') return 'text-red-700'
+  if (level === '高') return 'text-red-600'
+  if (level === '中') return 'text-amber-600'
+  return 'text-gray-900'
+}
+
+function buildSolutionSignals(solution: Solution, quote: Quote) {
+  const signals: string[] = []
+  if (quote.inventory_context?.urgency && quote.inventory_context.urgency !== '未知') {
+    signals.push(`库存${quote.inventory_context.urgency}`)
+  }
+  if (quote.supplier_profile?.risk_level) {
+    signals.push(`供应商${quote.supplier_profile.risk_level}风险`)
+  }
+  if ((quote.cost_breakdown?.anomaly_count || 0) >= 2) {
+    signals.push(`成本异常${quote.cost_breakdown?.anomaly_count}项`)
+  }
+  if (quote.peer_benchmark?.current_premium_pct != null && quote.peer_benchmark.current_premium_pct > 15) {
+    signals.push(`同行溢价${quote.peer_benchmark.current_premium_pct.toFixed(0)}%`)
+  }
+  if (solution.action === 'secure_supply' || solution.action === 'secure_then_negotiate') {
+    signals.push('优先保供')
+  }
+  return signals.slice(0, 3)
 }
 
 // ── 价格位置可视化横条 ──
@@ -752,18 +854,4 @@ function DecisionTimeline({ entries }: { entries: DecisionLogEntry[] }) {
       </div>
     </div>
   )
-}
-
-function exportExcel(quote: Quote) {
-  const wb = XLSX.utils.book_new()
-  const data: any[][] = [
-    ['物料', quote.material_name, '供应商', quote.supplier_name],
-    ['报价', String(quote.supplier_quote), '偏离度', String(quote.deviation_score)],
-    ['级别', quote.severity_level, '状态', quote.status],
-    [],
-    ['方案'],
-    ...(quote.solutions || []).map((s: Solution) => [s.title, s.action, s.confidence, s.estimated_savings]),
-  ]
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), 'Quote')
-  XLSX.writeFile(wb, `quote-${quote.id}.xlsx`)
 }

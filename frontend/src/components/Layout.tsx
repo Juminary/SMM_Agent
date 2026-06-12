@@ -6,7 +6,8 @@ import {
   Plus,
   BarChart3,
   Cpu,
-  PlayCircle
+  PlayCircle,
+  PackageCheck
 } from 'lucide-react'
 
 interface LayoutProps {
@@ -14,10 +15,11 @@ interface LayoutProps {
 }
 
 const navItems = [
-  { path: '/demo', icon: PlayCircle, label: '演示中心' },
-  { path: '/', icon: LayoutDashboard, label: '工作台' },
+  { path: '/', icon: PackageCheck, label: '采购流程' },
+  { path: '/dashboard', icon: LayoutDashboard, label: '数据工作台' },
   { path: '/quotes', icon: FileText, label: '异常列表' },
   { path: '/stats', icon: BarChart3, label: '统计分析' },
+  { path: '/demo', icon: PlayCircle, label: '演示中心' },
 ]
 
 export default function Layout({ children }: LayoutProps) {
@@ -43,7 +45,9 @@ export default function Layout({ children }: LayoutProps) {
         {/* Navigation */}
         <nav className="flex-1 p-5 space-y-1.5">
           {navItems.map((item) => {
-            const isActive = location.pathname === item.path
+            const isActive = item.path === '/'
+              ? location.pathname === '/' || location.pathname === '/procurement'
+              : location.pathname === item.path
             return (
               <Link
                 key={item.path}

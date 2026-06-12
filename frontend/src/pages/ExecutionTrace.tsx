@@ -6,14 +6,15 @@ import {
   Search, BarChart3, Globe, Clock, Target, TrendingUp,
   MessageSquare, AlertTriangle, CheckCircle, XCircle,
   HelpCircle, Sparkles, GitBranch, BarChart2,
-  SlidersHorizontal, FileSpreadsheet,
+  SlidersHorizontal, FileSpreadsheet, FileText,
 } from 'lucide-react'
 import { fetchQuote } from '../utils/api'
+import { exportQuotePdf } from '../utils/exportPdf'
+import { exportQuoteWorkbook } from '../utils/exportWorkbook'
 import type { Quote, DiagnosisHypothesis, TraceStep, DecisionLogEntry } from '../types'
 import OverrideModal from '../components/OverrideModal'
 import DiffView from '../components/DiffView'
 import ExecutionDAG from '../components/ExecutionDAG'
-import * as XLSX from 'xlsx'
 
 // ===== Tool icon mapping =====
 const TOOL_ICONS: Record<string, any> = {
@@ -124,6 +125,7 @@ export default function ExecutionTrace() {
     { label: '价格偏离', value: `${quote?.price_deviation?.toFixed?.(1) ?? quote?.price_deviation ?? 0}%`, tone: (quote?.price_deviation ?? 0) > 60 ? 'danger' : (quote?.price_deviation ?? 0) > 20 ? 'warn' : 'ok' },
     { label: '同行溢价', value: quote?.peer_benchmark?.current_premium_pct != null ? `${quote.peer_benchmark.current_premium_pct.toFixed(1)}%` : '暂无', tone: quote?.peer_benchmark?.current_premium_pct && quote.peer_benchmark.current_premium_pct > 50 ? 'danger' : 'neutral' },
     { label: '库存窗口', value: quote?.inventory_context?.days_remaining != null ? `${quote.inventory_context.days_remaining}天` : '未知', tone: quote?.inventory_context?.days_remaining != null && quote.inventory_context.days_remaining < 7 ? 'warn' : 'neutral' },
+    { label: '供应商风险', value: quote?.supplier_profile?.risk_level || '待评估', tone: quote?.supplier_profile?.risk_level === '极高' || quote?.supplier_profile?.risk_level === '高' ? 'danger' : quote?.supplier_profile?.risk_level === '中' ? 'warn' : 'neutral' },
     { label: '结论置信度', value: quote?.diagnosis_conclusion?.confidence != null ? `${(quote.diagnosis_conclusion.confidence * 100).toFixed(0)}%` : '待生成', tone: (quote?.diagnosis_conclusion?.confidence ?? 0) >= 0.7 ? 'ok' : 'warn' },
   ] as const
   const recommendedAction = awaitingSolutionSelection
@@ -216,11 +218,18 @@ export default function ExecutionTrace() {
               对比重跑
             </button>
             <button
-              onClick={() => exportReport(quote)}
+              onClick={() => exportQuoteWorkbook(quote, 'trace')}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-indigo-200 text-indigo-600 rounded-lg hover:bg-indigo-50 transition-colors bg-white shadow-sm"
             >
               <FileSpreadsheet size={13} />
-              导出报告
+              导出Excel
+            </button>
+            <button
+              onClick={() => exportQuotePdf(quote, 'trace')}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors bg-white shadow-sm"
+            >
+              <FileText size={13} />
+              导出PDF
             </button>
           </div>
         </div>
@@ -350,7 +359,7 @@ export default function ExecutionTrace() {
           />
           <SummaryStatCard
             label="当前结论"
-            value={quote.diagnosis_conclusion?.cause_category || (quote.phase === 'fast_pass' ? 'normal' : '待确认')}
+            value={formatCauseCategory(quote.diagnosis_conclusion?.cause_category || (quote.phase === 'fast_pass' ? 'normal' : ''))}
             caption={quote.diagnosis_conclusion?.root_cause?.slice(0, 48) || '尚未形成诊断结论'}
             accent="#7c3aed"
             icon={Sparkles}
@@ -1184,7 +1193,7 @@ function ConclusionPanel({ conclusion }: { conclusion: NonNullable<Quote['diagno
             <div className="text-xs text-gray-400 mb-1">根因</div>
             <p className="text-sm font-semibold text-gray-900 leading-relaxed">{conclusion.root_cause}</p>
             <div className="flex gap-3 mt-2">
-              <span className="text-xs text-gray-500">类别：{conclusion.cause_category}</span>
+              <span className="text-xs text-gray-500">类别：{formatCauseCategory(conclusion.cause_category)}</span>
             </div>
           </div>
           <div className="flex flex-col items-end">
@@ -1206,6 +1215,18 @@ function ConclusionPanel({ conclusion }: { conclusion: NonNullable<Quote['diagno
       </div>
     </div>
   )
+}
+
+function formatCauseCategory(category?: string) {
+  const map: Record<string, string> = {
+    normal: '报价正常',
+    supplier_premium: '供应商溢价',
+    market_trend: '市场行情驱动',
+    cost_structure_anomaly: '成本结构异常',
+    insufficient_data: '数据不足',
+    unknown_anomaly: '待人工确认',
+  }
+  return map[category || ''] || category || '待确认'
 }
 
 function DecisionLogPanel({ entries }: { entries: any[] }) {
@@ -1495,37 +1516,4 @@ function getLatestFeedbackContext(decisionLog: DecisionLogEntry[] | undefined, s
   }
 
   return null
-}
-
-function exportReport(quote: Quote | null) {
-  if (!quote) return
-  const wb = XLSX.utils.book_new()
-  const data: any[][] = [
-    ['报价异常溯源报告'],
-    [''],
-    ['物料', quote.material_name, '供应商', quote.supplier_name],
-    ['报价', String(quote.supplier_quote), '偏离度', String(quote.deviation_score)],
-    ['级别', quote.severity_level, '状态', quote.status],
-    [''],
-  ]
-  if (quote.diagnosis_conclusion) {
-    data.push(['AI诊断结论', quote.diagnosis_conclusion.root_cause])
-    data.push(['诊断类别', quote.diagnosis_conclusion.cause_category])
-    data.push(['可信度', `${(quote.diagnosis_conclusion.confidence * 100).toFixed(0)}%`])
-    data.push([])
-  }
-  if (quote.supplier_profile?.available) {
-    data.push(['供应商信息'])
-    data.push(['采购次数', String(quote.supplier_profile.purchase_count)])
-    data.push(['历史偏离均值', `${quote.supplier_profile.avg_deviation_score}分`])
-    data.push([])
-  }
-  if (quote.peer_benchmark?.available) {
-    data.push(['同行对比'])
-    data.push(['同行均价', `¥${quote.peer_benchmark.peer_avg_price}`])
-    data.push(['溢价率', `${quote.peer_benchmark.current_premium_pct.toFixed(1)}%`])
-    data.push([])
-  }
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), '溯源报告')
-  XLSX.writeFile(wb, `溯源报告-${quote.material_name}-${quote.id.slice(0, 8)}.xlsx`)
 }

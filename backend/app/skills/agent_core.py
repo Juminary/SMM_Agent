@@ -806,18 +806,31 @@ class CostAnalyzer(Tool):
             'PCB板': 'pcb',
             '传感器': 'sensor',
             '按键': 'silicone',
-            '袖带': 'cuff'
+            '袖带': 'cuff',
+            '显示屏': 'display_module',
+            '电池': 'battery_pack',
+            '连接器': 'metal_connector',
         }
         return mapping.get(category, 'plastic_injection')
 
     def _adjust_benchmark(self, benchmark: Dict, material: Dict) -> Dict:
         adjusted = benchmark.copy()
         processing = material.get('processing', '')
+        material_type = material.get('material_type', '')
         if '沉金' in processing:
             adjusted['surface_treatment_pct'] = 20
             adjusted['raw_material_pct'] = 22
         elif 'COB' in processing:
             adjusted['processing_pct'] = 35
+        elif '电镀' in processing:
+            adjusted['surface_treatment_pct'] = max(12, adjusted.get('surface_treatment_pct', 0))
+
+        if material_type in {'OLED', 'TFT彩屏'}:
+            adjusted['raw_material_pct'] = max(62, adjusted.get('raw_material_pct', 0))
+            adjusted['processing_pct'] = max(16, adjusted.get('processing_pct', 0))
+        elif material_type in {'锂聚合物', '锂离子18650'}:
+            adjusted['raw_material_pct'] = max(70, adjusted.get('raw_material_pct', 0))
+            adjusted['management_profit_pct'] = min(12, adjusted.get('management_profit_pct', 0))
         return adjusted
 
     def execute(self, material_id: str, supplier_quote: float,
@@ -1429,6 +1442,27 @@ class SolutionGenerator(Tool):
         solutions = []
         score = deviation.get('deviation_score', 0)
         severity = deviation.get('severity_level', '正常')
+        quantity = int(quote.get('quantity', 0) or 0)
+        supplier_ctx = quote.get('supplier_profile') or {}
+        inventory_ctx = quote.get('inventory_context') or {}
+        peer_ctx = quote.get('peer_benchmark') or {}
+        alternatives = quote.get('alternatives') or []
+        cost_ctx = quote.get('cost_analysis') or {}
+        urgency = inventory_ctx.get('urgency', '未知')
+        can_negotiate = inventory_ctx.get('can_negotiate', True)
+        days_remaining = inventory_ctx.get('days_remaining')
+        risk_level = supplier_ctx.get('risk_level', '低')
+        premium = peer_ctx.get('current_premium_pct')
+        anomaly_count = cost_ctx.get('anomaly_count', 0)
+        ai_mid = quote.get('ai_prediction_mid') or quote['supplier_quote'] * 0.9
+
+        def money(value: float) -> str:
+            return f"¥{value:,.0f}"
+
+        def savings(target_price: float) -> str:
+            if quantity <= 0:
+                return '待测算'
+            return money(max(0, (quote['supplier_quote'] - target_price) * quantity))
 
         if severity == '正常':
             solutions.append({
@@ -1441,28 +1475,58 @@ class SolutionGenerator(Tool):
             })
 
         elif severity == '紧急':
-            target_price = quote.get('ai_prediction_mid', quote['supplier_quote'] * 0.85)
-            savings = (quote['supplier_quote'] - target_price) * quote.get('quantity', 0)
-            solutions.append({
-                'id': f"SOL-{quote['id']}-A",
-                'title': '直接议价',
-                'description': f"当前报价¥{quote['supplier_quote']} vs AI预测上限¥{quote.get('ai_prediction_high', 'N/A')}，偏离+{deviation.get('price_deviation', 0):.0f}%。建议以¥{target_price:.2f}为目标进行议价。",
-                'confidence': 0.85,
-                'estimated_savings': f"¥{savings:,.0f}",
-                'action': 'negotiate'
-            })
+            urgent_target = max(ai_mid, quote['supplier_quote'] * 0.9)
+            if urgency in {'紧急', '关注'} and not can_negotiate:
+                window_text = f"{days_remaining}天" if days_remaining is not None else "短窗口"
+                solutions.append({
+                    'id': f"SOL-{quote['id']}-A",
+                    'title': '保供采购+限时议价',
+                    'description': (
+                        f"库存窗口仅{window_text}，应先锁定供货避免断供，同时以¥{urgent_target:.2f}为底线目标进行限时议价。"
+                        f" 当前供应商风险：{supplier_ctx.get('risk_assessment', '待确认')}。"
+                    ),
+                    'confidence': 0.91,
+                    'estimated_savings': savings(urgent_target),
+                    'action': 'secure_supply'
+                })
+            else:
+                solutions.append({
+                    'id': f"SOL-{quote['id']}-A",
+                    'title': '直接议价',
+                    'description': (
+                        f"当前报价¥{quote['supplier_quote']}明显偏高，建议以¥{ai_mid:.2f}为目标强议价。"
+                        + (f" 同行溢价约{premium:.0f}%。" if premium is not None else "")
+                    ),
+                    'confidence': 0.86,
+                    'estimated_savings': savings(ai_mid),
+                    'action': 'negotiate'
+                })
+
+            requote_desc = (
+                f"建议优先联系备选供应商 {alternatives[0].get('supplier_name', '')} 进行二次询价。"
+                if alternatives else
+                "建议同步向2-3家同类供应商发起二次询价，验证当前报价是否存在系统性溢价。"
+            )
             solutions.append({
                 'id': f"SOL-{quote['id']}-B",
-                'title': '二次询价',
-                'description': "单一供应商报价，无法判断是否具有代表性。建议向其他2-3家同类供应商发起二次询价。",
-                'confidence': 0.72,
-                'estimated_savings': '待定',
+                'title': '启动备选询价',
+                'description': requote_desc,
+                'confidence': 0.78 if alternatives else 0.72,
+                'estimated_savings': '待询价',
                 'action': 'requote'
             })
+
+            escalation_signals = []
+            if risk_level in {'高', '极高'}:
+                escalation_signals.append(f"供应商风险{risk_level}")
+            if anomaly_count >= 2:
+                escalation_signals.append('成本结构异常项较多')
+            if urgency in {'紧急', '关注'}:
+                escalation_signals.append(f"库存{urgency}")
             solutions.append({
                 'id': f"SOL-{quote['id']}-C",
-                'title': '升级处理',
-                'description': f"偏离度>{score}分，超出工程师自主处理权限。建议上报采购经理，进行专项评审。",
+                'title': '升级审批',
+                'description': f"{'；'.join(escalation_signals) or f'偏离度{score}分'}，建议上报采购经理或供应链负责人专项评审。",
                 'confidence': 0.90,
                 'estimated_savings': '需评审',
                 'action': 'escalate'
@@ -1470,24 +1534,56 @@ class SolutionGenerator(Tool):
 
         elif severity in ['关注', '警示']:
             if deviation.get('price_deviation', 0) > 0:
-                solutions.append({
-                    'id': f"SOL-{quote['id']}-A",
-                    'title': '议价谈判',
-                    'description': f"报价¥{quote['supplier_quote']}高于AI预测区间，偏离+{deviation.get('price_deviation', 0):.0f}%。建议议价。",
-                    'confidence': 0.80,
-                    'estimated_savings': '待计算',
-                    'action': 'negotiate'
-                })
+                if urgency in {'紧急', '关注'} and not can_negotiate:
+                    solutions.append({
+                        'id': f"SOL-{quote['id']}-A",
+                        'title': '先保供后追价',
+                        'description': (
+                            f"库存{urgency}，当前不适合因议价拖延交付。建议先确认交期并下保供订单，"
+                            f"后续以¥{max(ai_mid, quote['supplier_quote'] * 0.92):.2f}附近重新追价。"
+                        ),
+                        'confidence': 0.84,
+                        'estimated_savings': savings(max(ai_mid, quote['supplier_quote'] * 0.92)),
+                        'action': 'secure_then_negotiate'
+                    })
+                else:
+                    solutions.append({
+                        'id': f"SOL-{quote['id']}-A",
+                        'title': '议价谈判',
+                        'description': (
+                            f"报价¥{quote['supplier_quote']}高于AI预测区间，建议以¥{ai_mid:.2f}为目标价开展议价。"
+                            + (f" 同行溢价约{premium:.0f}%。" if premium is not None else "")
+                        ),
+                        'confidence': 0.82,
+                        'estimated_savings': savings(ai_mid),
+                        'action': 'negotiate'
+                    })
             else:
                 solutions.append({
                     'id': f"SOL-{quote['id']}-A",
-                    'title': '工艺确认',
-                    'description': f"报价¥{quote['supplier_quote']}低于AI预测区间，偏离{deviation.get('price_deviation', 0):.0f}%。建议核实工艺要求。",
-                    'confidence': 0.78,
+                    'title': '低价真实性核验',
+                    'description': (
+                        f"报价¥{quote['supplier_quote']}低于AI预测区间，需核实报价单位、BOM完整性和关键工艺是否遗漏，"
+                        "避免后续质量或交付风险。"
+                    ),
+                    'confidence': 0.81,
                     'estimated_savings': '风险规避',
                     'action': 'verify'
                 })
-            if similar_materials:
+
+            if risk_level in {'高', '极高'}:
+                solutions.append({
+                    'id': f"SOL-{quote['id']}-B",
+                    'title': '供应商风险复核',
+                    'description': (
+                        f"该供应商画像显示 {supplier_ctx.get('risk_assessment', '存在风险信号')}，"
+                        f"建议采用 {supplier_ctx.get('recommended_procurement_mode', '补充审批和成本拆解')}。"
+                    ),
+                    'confidence': 0.79,
+                    'estimated_savings': '降低误采风险',
+                    'action': 'review_supplier'
+                })
+            elif similar_materials:
                 solutions.append({
                     'id': f"SOL-{quote['id']}-B",
                     'title': '历史对比',
@@ -1497,7 +1593,17 @@ class SolutionGenerator(Tool):
                     'action': 'compare'
                 })
 
-        return solutions
+            if alternatives and len(solutions) < 3:
+                solutions.append({
+                    'id': f"SOL-{quote['id']}-C",
+                    'title': '备选供应商验证',
+                    'description': f"可同步联系备选供应商 {alternatives[0].get('supplier_name', '其他供方')}，用真实询价验证当前价格是否具备市场竞争力。",
+                    'confidence': 0.74,
+                    'estimated_savings': '待询价',
+                    'action': 'requote'
+                })
+
+        return solutions[:3]
 
     def execute(
         self,
@@ -1511,7 +1617,19 @@ class SolutionGenerator(Tool):
     ) -> Dict[str, Any]:
         """Tool 接口：生成应对方案"""
         deviation = {**(deviation_details or {}), "deviation_score": deviation_score, "severity_level": severity_level}
-        quote = {"id": quote_id, "supplier_quote": supplier_quote, "quantity": 10000}
+        quote = {
+            "id": quote_id,
+            "supplier_quote": supplier_quote,
+            "quantity": kwargs.get("quantity", 10000),
+            "supplier_profile": kwargs.get("supplier_profile", {}),
+            "inventory_context": kwargs.get("inventory_context", {}),
+            "peer_benchmark": kwargs.get("peer_benchmark", {}),
+            "market_context": kwargs.get("market_context", {}),
+            "alternatives": kwargs.get("alternatives", []),
+            "cost_analysis": kwargs.get("cost_analysis", {}),
+            "ai_prediction_mid": kwargs.get("ai_prediction_mid"),
+            "ai_prediction_high": kwargs.get("ai_prediction_high"),
+        }
 
         results = self.generate(quote, deviation, similar_materials or [])
         return {
@@ -1630,7 +1748,10 @@ class SupplierProfiler(Tool):
         ]
 
         # 综合评级
+        result["risk_level"] = self._classify_risk_level(result)
+        result["pricing_behavior"] = self._classify_pricing_behavior(result)
         result["risk_assessment"] = self._assess_risk(result)
+        result["recommended_procurement_mode"] = self._recommend_mode(result)
 
         data_points = len(records) + result.get("analyzed_quotes", 0)
         return {
@@ -1727,6 +1848,46 @@ class SupplierProfiler(Tool):
             return f"中风险：{risks[0]}，{risks[1]}"
         else:
             return f"高风险：{'；'.join(risks)}"
+
+    def _classify_risk_level(self, profile: Dict) -> str:
+        anomaly_rate = profile.get("anomaly_rate_pct", 0)
+        volatility = profile.get("price_volatility_pct", 0)
+        avg_dev = profile.get("avg_deviation_score", 0)
+
+        if anomaly_rate >= 50 or avg_dev >= 65:
+            return "极高"
+        if anomaly_rate >= 30 or volatility >= 25 or avg_dev >= 45:
+            return "高"
+        if anomaly_rate >= 15 or volatility >= 15 or avg_dev >= 25:
+            return "中"
+        return "低"
+
+    def _classify_pricing_behavior(self, profile: Dict) -> str:
+        anomaly_rate = profile.get("anomaly_rate_pct", 0)
+        trend = profile.get("price_trend", "")
+        volatility = profile.get("price_volatility_pct", 0)
+
+        if anomaly_rate >= 35 and trend == "上升":
+            return "系统性偏高且持续上涨"
+        if trend == "上升":
+            return "近期报价走高"
+        if volatility >= 25:
+            return "报价波动较大"
+        if anomaly_rate <= 10:
+            return "报价相对稳定"
+        return "偶发异常"
+
+    def _recommend_mode(self, profile: Dict) -> str:
+        risk_level = profile.get("risk_level", "低")
+        behavior = profile.get("pricing_behavior", "")
+
+        if risk_level in {"极高", "高"}:
+            return "二供询价 + 经理审批 + 要求成本拆解"
+        if "上涨" in behavior:
+            return "保留供货窗口，同时锁定目标价再议价"
+        if "稳定" in behavior:
+            return "常规议价或年度框架复核"
+        return "补充证据后再决策"
 
 
 class PeerComparer(Tool):
